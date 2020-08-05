@@ -28,7 +28,7 @@
 // clang++ nts.o $(llvm-config --ldflags --libs) -lpthread -ltinfo
 // in one line:
 // clang++ -O3 -c $(llvm-config --cxxflags) nts.cpp -o nts.o && clang++ nts.o $(llvm-config --ldflags --libs) -lpthread -ltinfo...*/
-//LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1
+// set environment variable: LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1
 
 // to get llvm set up:
 // https://clang.llvm.org/get_started.html # more up to date info
@@ -42,19 +42,10 @@
 //>     Simple Error Handling                                 |
 //>-----------------------------------------------------------+
 
-int countlines(const std::string &str, int *pos) {
-  // determine the line number of position pos in the string
-  // assumes that 0 <= pos < length of str
-  int ans = 1;
-  for (int i = 0; i < *pos; i++) {
-    if (str[i] == '\n')
-      ans++;
-  }
-  return ans;
-}
 
-void error(const std::string msg, const std::string &str, int *pos) {
-  std::cout << "Error on line " << countlines(str, pos) << ": " << msg << "\n";
+void parse_error(const std::string msg, int lineno, FILE *f) {
+  std::cout << "Parsing error on line " << lineno << ": " << msg << "\n";
+  fclose(f);
   exit(0);
 }
 
@@ -97,48 +88,50 @@ bool isalnumsym(char c) {
     return false;
 }
 
-static int gettok(std::string str, int *i) {
+static int gettok(FILE *f) {
+  char c = fgetc(f);
   // ignore whitespace and comments
-  while (isspace(str[*i]) || str[*i] == '#') {
-    if (str[*i] == '\n') line_no++; // '\n' counts as whitespace, so we can keep track of line numbers here
-    if (str[*i] == '#') {
-      do (*i)++; while (str[*i] != EOF && str[*i] != '\n' && str[*i] != '\r' && str[*i] != 0);
+  while (isspace(c) || c == '#') {
+    if (c == '\n') line_no++; // '\n' counts as whitespace, so we can keep track of line numbers here
+    if (c == '#') {
+      do c = fgetc(f); while (c != EOF && c != '\n' && c != '\r' && c != 0);
     } else {
-      (*i)++;
+      c = fgetc(f);
     }
   }
   // check for end of string / file
-  if (str[*i] == 0 || str[*i] == EOF) return tok_eof;
+  if (c == 0 || c == EOF) return tok_eof;
   // delimiters
-  if (str[*i] == '(')  { (*i)++; return tok_opar; }
-  if (str[*i] == ')')  { (*i)++; return tok_cpar; }
-  if (str[*i] == '[')  { (*i)++; return tok_obrk; }
-  if (str[*i] == ']')  { (*i)++; return tok_cbrk; }
-  if (str[*i] == '\'') { (*i)++; return tok_quot; }
-  // indentifier or digit
-  if (isalnumsym(str[*i])) {
+  if (c == '(')  { return tok_opar; }
+  if (c == ')')  { return tok_cpar; }
+  if (c == '[')  { return tok_obrk; }
+  if (c == ']')  { return tok_cbrk; }
+  if (c == '\'') { return tok_quot; }
+  // indentifier or numeber
+  if (isalnumsym(c)) {
     std::string acc_str;
     int state = ls_start;
     do {
       switch (state) {
         case ls_start:
-          if (str[*i] == '-')
+          if (c == '-')
             state = ls_minus;
-          else if (isdigit(str[*i]))
+          else if (isdigit(c))
             state = ls_numeral;
           else
             state = ls_ident;
           break;
         case ls_minus:
-          if (isdigit(str[*i]))
+          if (isdigit(c))
             state = ls_numeral;
           else
             state = ls_ident;
           break;
       }
-      acc_str += str[*i];
-      (*i)++;
-    } while (isalnumsym(str[*i]));
+      acc_str.push_back(c);
+      c = fgetc(f);
+    } while (isalnumsym(c));
+    ungetc(c, f); // put back the final character c not a part of the identifier/number
     switch (state) {
       case ls_minus:
       case ls_ident:
@@ -146,11 +139,11 @@ static int gettok(std::string str, int *i) {
         return tok_iden;
       case ls_numeral:
         int_val = strtol(acc_str.c_str(), NULL, 0);
-        if (errno != 0) error("invalid number literal", str, i);
+        if (errno != 0) parse_error("invalid number literal", line_no, f);
         return tok_int;
     }
   }
-  error("invalid character", str, i);
+  parse_error("invalid character", line_no, f);
   return 0;
 }
 
@@ -203,11 +196,7 @@ public:
   Expr(int kind, int line) : kind(kind), line(line) {}
   virtual ~Expr() {}
   virtual void show() {}
-  virtual ExprCall *make_iter(std::vector<ExprCall *> &curr_stack) {
-    std::cout << "error: did not expect to see a '[' here\n";
-    exit(0);
-    return NULL;
-  }
+  virtual ExprCall *make_iter(std::vector<ExprCall *> &curr_stack) { return NULL; } // throw error
   virtual std::string *get_iden() { return NULL; }
   virtual std::vector<Expr *> *get_elems() { return NULL; }
   virtual llvm::Value *codegen() = 0;
@@ -287,8 +276,7 @@ enum Delim {
   dl_quot = 3,
 };
 
-ExprCall *parse(const std::string inp_str) {
-  int pos = 0;
+ExprCall *parse(FILE *f) {
   int tok = 0;
   // program is the thing we write to:
   ExprCall *program = new ExprCall(0);
@@ -300,7 +288,7 @@ ExprCall *parse(const std::string inp_str) {
   bool quoting = false;
   // parse:
   while (tok != tok_eof) {
-    tok = gettok(inp_str, &pos);
+    tok = gettok(f);
     ExprCall *tmp_expr;
     switch (tok) {
       case tok_opar:
@@ -311,19 +299,21 @@ ExprCall *parse(const std::string inp_str) {
         break;
       case tok_cpar:
         if (delim_stack.back() != dl_paren)
-          error("did not expect to see ')' here", inp_str, &pos);
+          parse_error("did not expect to see ')' here", line_no, f);
         curr_stack.pop_back();
         delim_stack.pop_back();
         break;
       case tok_obrk:
         tmp_expr = curr_stack.back()->elems.back()->make_iter(curr_stack);
+        if (tmp_expr == NULL)
+          parse_error("did not expect to see '[' here, square brackets should appear after an s-expression", line_no, f);
         curr_stack[curr_stack.size() - 2]->elems.pop_back();
         curr_stack[curr_stack.size() - 2]->elems.push_back(tmp_expr);
         delim_stack.push_back(dl_brkt);
         break;
       case tok_cbrk:
         if (delim_stack.back() != dl_brkt)
-          error("did not expect to see ']' here", inp_str, &pos);
+          parse_error("did not expect to see ']' here", line_no, f);
         curr_stack.pop_back();
         delim_stack.pop_back();
         break;
@@ -575,19 +565,39 @@ llvm::Function *ExprCall::fngen() {
 
 
 //>-----------------------------------------------------------+
-//>     Main                                                  |
+//>     Compilation Function                                  |
 //>-----------------------------------------------------------+
 
-int main() {
-  //const std::string test_str = " ( 123 hello 789 - -4 -dqqq 'nil '(quoted list)[with iteration])[]\n   # stuff \n   # $$#$@ \n (+ 2 3 (+ i j))[i j] "; // test string for parsing
-  const std::string test_str = "(def int affine (int x int y) (+ x (* 4 y)))\n(putchar 33)#(affine -3 9))"; // very simple test string
-  ExprCall *program = parse(test_str);
+void compile(FILE *source_code) {
+  // note: this function closes the source code file
+  // since we use global state, this should be called only once!
+  // TODO: stop using global state
+  ExprCall *program = parse(source_code);
+  fclose(source_code); // we are done reading the file...
   program->show();
   std::cout << "\n parsing complete, compiling...\n";
   prefill_builtins();
   llvm::Function *main_fn = program->fngen(); // generate code
-  TheModule.print(llvm::errs(), nullptr);
-  // TheModule->print(llvm::errs(), NULL); // causes segfault right now, pls implement more stuff
+  TheModule.print(llvm::errs(), nullptr); // TODO: return llvm ir, or something
+}
+
+
+
+//>-----------------------------------------------------------+
+//>     Main                                                  |
+//>-----------------------------------------------------------+
+
+int main(int argc, char **argv) {
+  if (argc < 2) {
+    std::cout << "please specify a file name to compile\n";
+    return 0;
+  }
+  FILE *fp = fopen(argv[1], "r");
+  if (fp == NULL) {
+    std::cout << "invalid file\n";
+    return 0;
+  }
+  compile(fp); // convert fp to llvm ir, and close the file
   return 0;
 }
 

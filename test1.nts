@@ -1,0 +1,2 @@
+(def int affine (int x int y) (+ x (* 4 y)))
+(putchar (affine -3 9)) # equivalent to (putchar 33)
