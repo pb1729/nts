@@ -154,32 +154,66 @@ static int gettok(FILE *f) {
 
 
 enum TypCons { // ways to construct a typ
-  tc_nil      = 0,
-  tc_int      = 1,
-  tc_fn       = -1,
-  tc_tup      = -2,
+  tc_fail     = -1, // denotes an invalid typ
+  tc_void     = 0,
+  tc_typ      = 1, // the typ of any other typ
+  tc_int      = 2,
+  tc_fn       = 8,
+  tc_tup      = 9,
 };
 
 typedef struct Typ {
   TypCons tc;
-  struct Typ *t1;
-  std::vector<struct Typ> *ts;
+  std::vector<struct Typ> t1;
+  std::vector<struct Typ> t2;
 } Typ;
+
+Typ typ_from_tc(TypCons tc) {
+  Typ ans{};
+  ans.tc = tc;
+  return ans;
+}
 
 typedef struct VarInfo {
   Typ typ;
   llvm::Value *val;
   llvm::Function *fun;
+  Typ typval;
 } VarInfo;
 
-VarInfo var_info_from_value(llvm::Value *val, Typ typ)      { return (VarInfo){typ, val,  NULL}; }
-VarInfo var_info_from_function(llvm::Function *fn, Typ typ) { return (VarInfo){typ, NULL, fn  }; }
+VarInfo var_info_from_value(llvm::Value *val, Typ typ)      { return (VarInfo){typ, val,  NULL, typ_from_tc(tc_fail)}; }
+VarInfo var_info_from_function(llvm::Function *fn, Typ typ) { return (VarInfo){typ, NULL, fn,   typ_from_tc(tc_fail)}; }
+VarInfo var_info_from_typ(Typ tp)          { return (VarInfo){typ_from_tc(tc_typ),  NULL, NULL, tp                  }; }
+VarInfo var_info_fail()                    { return (VarInfo){typ_from_tc(tc_fail), NULL, NULL, typ_from_tc(tc_fail)}; }
+VarInfo var_info_void()                    { return (VarInfo){typ_from_tc(tc_void), NULL, NULL, typ_from_tc(tc_fail)}; }
 
-Typ *typ_alloc(Typ t) {
-  Typ *ans = (Typ *)malloc(sizeof(Typ));
-  *ans = t;
-  return ans;
+llvm::Value *vi_get_val(VarInfo vi) {
+  switch (vi.typ.tc) {
+    case tc_int: // TODO: add more here as time goes on...
+      return vi.val;
+    default:
+      return NULL;
+  }
 }
+
+llvm::Function *vi_get_fn(VarInfo vi) {
+  switch (vi.typ.tc) {
+    case tc_fn:
+      return vi.fun;
+    default:
+      return NULL;
+  }
+}
+
+Typ vi_get_typ(VarInfo vi) {
+  switch (vi.typ.tc) {
+    case tc_typ:
+      return vi.typval;
+    default:
+      return typ_from_tc(tc_fail);
+  }
+}
+
 
 
 //>-----------------------------------------------------------+
@@ -199,9 +233,7 @@ public:
   virtual ExprCall *make_iter(std::vector<ExprCall *> &curr_stack) { return NULL; } // throw error
   virtual std::string *get_iden() { return NULL; }
   virtual std::vector<Expr *> *get_elems() { return NULL; }
-  virtual llvm::Value *codegen() = 0;
-  virtual llvm::Function *fngen() = 0;
-  virtual Typ typgen() = 0;
+  virtual VarInfo codegen() = 0;
   virtual void fail(std::string msg) {
     std::cout << "Error in expression on line " << line << ": " << msg << "\n";
     exit(0);
@@ -213,9 +245,7 @@ public:
   int val;
   ExprInt(int val, int line) : val(val), Expr(1, line) {}
   void show() {std::cout << " " << val << " ";}
-  virtual llvm::Value *codegen();
-  virtual llvm::Function *fngen();
-  virtual Typ typgen();
+  virtual VarInfo codegen();
 };
 
 class ExprIden : public Expr {
@@ -229,9 +259,7 @@ public:
       std::cout << " " << name << " ";
   }
   std::string *get_iden() { return &name; }
-  virtual llvm::Value *codegen();
-  virtual llvm::Function *fngen();
-  virtual Typ typgen();
+  virtual VarInfo codegen();
 };
 
 class ExprCall : public Expr {
@@ -256,12 +284,8 @@ public:
     return ans;
   }
   std::vector<Expr *> *get_elems() { return &elems; }
-  virtual llvm::Value *codegen();
-  virtual llvm::Function *fngen();
-  virtual Typ typgen();
+  virtual VarInfo codegen();
 };
-
-
 
 
 
@@ -280,7 +304,7 @@ ExprCall *parse(FILE *f) {
   int tok = 0;
   // program is the thing we write to:
   ExprCall *program = new ExprCall(0);
-  program->elems.push_back(new ExprIden("main_program_code", 0));
+  program->elems.push_back(new ExprIden("{main_program_code}", 0)); // curly braces so that user cannot call this fn
   // make stacks to keep track of program structure:
   std::vector<Delim> delim_stack; delim_stack.push_back(dl_file);
   std::vector<ExprCall*> curr_stack; curr_stack.push_back(program);
@@ -359,207 +383,143 @@ llvm::Type *typ_conv(Typ t) {
 
 // prefill some named values:
 void prefill_builtins() {
-  // get the putchar function from C
+  // basic type definitions:
+  NamedValues->set("int", var_info_from_typ(typ_from_tc(tc_int)));
+  NamedValues->set("void", var_info_from_typ(typ_from_tc(tc_void)));
+  
+  // steal the putchar function from C
   std::vector<llvm::Type *> args(1, llvm::Type::getInt64Ty(TheContext));
-  std::vector<Typ> *argtyps = new std::vector<Typ>;
-  argtyps->push_back((Typ){tc_int, NULL, NULL});
+  Typ fntyp = typ_from_tc(tc_fn); // create a new empty function type
+  fntyp.t1.push_back(typ_from_tc(tc_int)); // add argument typs
+  fntyp.t2.push_back(typ_from_tc(tc_int)); // add return typ
   llvm::FunctionType *FT = llvm::FunctionType::get(
     llvm::Type::getInt64Ty(TheContext), args, false);
   llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "putchar", TheModule);
-  NamedValues->set("putchar", var_info_from_function(F, (Typ){tc_fn, typ_alloc((Typ){tc_int, NULL, NULL}), argtyps}));
-  /*
-  // 2 argument integer addition...
-  std::vector<llvm::Type *> args(2, llvm::Type::getInt64Ty(TheContext));
-  llvm::FunctionType *FT = llvm::FunctionType::get(
-    llvm::Type::getInt64Ty(TheContext), args, false);
-  llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "+", TheModule.get());
-  int i = 0;
-  for (auto &Arg : F->args())
-    Arg.setName("x" + std::to_string(++i));
-  
-  llvm::BasicBlock *BB = llvm::BasicBlock::Create(TheContext, "entry", F);
-  Builder.SetInsertPoint(BB);
-  stackmap<std::string, std::pair<llvm::Value *, Typ>> nv(NamedValues); // new stackmap for arguments and local variables of this fn...
-  NamedValues = &nv;
-  for (auto &Arg : F->args())
-    NamedValues->set(std::string(Arg.getName()), std::pair<llvm::Value *, Typ>(&Arg, (Typ){tc_int, NULL, NULL}));
-  llvm::Value *retval = Builder.CreateAdd(
-    NamedValues->at("x1").first,
-    NamedValues->at("x2").first, "addtmp"); // TODO: look up what does addtmp mean (esp. tmp)
-  Builder.CreateRet(retval);
-  llvm::verifyFunction(*F);
-  NamedValues = nv.pop(); // go back to normal
-  // TODO: insert this nice new function into GlobalValues
-  // TODO: lots more!!! (plus maybe addition should be inlined anyway :/) */
+  NamedValues->set("putchar", var_info_from_function(F, fntyp));
 }
 
 // codegen for the various expression types:
 
 
-Typ ExprInt::typgen() {
-  fail("can't interpret integer as a type");
-  return (Typ){tc_nil, NULL, NULL};
-}
-
-llvm::Value *ExprInt::codegen() {
-  return llvm::ConstantInt::get(TheContext, llvm::APInt(64, val, true));
-}
-
-llvm::Function *ExprInt::fngen() {
-  fail("can't interpret integer as a function");
-  return NULL;
+VarInfo ExprInt::codegen() {
+  llvm::Value *lval = llvm::ConstantInt::get(TheContext, llvm::APInt(64, val, true));
+  return var_info_from_value(lval, typ_from_tc(tc_int));
 }
 
 
-Typ ExprIden::typgen() {
-  if (name.compare("int") == 0) return (Typ){tc_int, NULL, NULL};
-  if (name.compare("nil") == 0) return (Typ){tc_nil, NULL, NULL};
-  // TODO: lookup user defined types here, once those are a thing
-  fail(name + " is not a valid type");
-  return (Typ){tc_nil, NULL, NULL};
-}
-
-llvm::Value *ExprIden::codegen() {
+VarInfo ExprIden::codegen() {
   if (NamedValues->has(name)) {
-    VarInfo var_info = NamedValues->at(name);
-    if (var_info.typ.tc == tc_fn) {
-      fail("did not expect a function here!");
-      return NULL;
-    }
-    return var_info.val;
+    return NamedValues->at(name);
   }
   fail("variable " + name + " is not defined here");
-  return NULL;
-}
-
-llvm::Function *ExprIden::fngen() {
-  if (NamedValues->has(name)) {
-    VarInfo var_info = NamedValues->at(name);
-    if (var_info.typ.tc != tc_fn) {
-      fail(name + " is not a function");
-      return NULL;
-    }
-    return var_info.fun;
-  }
-  fail("variable " + name + " is not defined here");
-  return NULL;
+  return var_info_fail();
 }
 
 
-Typ ExprCall::typgen() {
-  if (elems[0]->get_iden()->compare("->") == 0) {
-    // TODO: get typs of arguments...
-    return (Typ){tc_fn, typ_alloc(elems[2]->typgen()), NULL};
-  }
-  fail("expression does not describe a type");
-  return (Typ){tc_nil, NULL, NULL};
-}
-
-llvm::Value *ExprCall::codegen() {
+VarInfo ExprCall::codegen() {
   // TODO: special handling for for loops, def, <-, lambda, tensors, +, -, *, /, etc.
   int size = elems.size();
-  if (size == 0) return NULL; // () yields nil (or something...)
+  if (size == 0) return var_info_fail(); // illegal
   std::string *iden = elems[0]->get_iden();
   if (iden != NULL) { // check for and handle builtins...
     // TODO: assertions for argument number and structure for builtins
     if (iden->compare("+") == 0) { // handle addition
-      return Builder.CreateAdd(
-        elems[1]->codegen(),
-        elems[2]->codegen(), "addtmp");
+      llvm::Value *argl = vi_get_val(elems[1]->codegen());
+      if (argl == NULL) fail("could not determine value of left argument");
+      llvm::Value *argr = vi_get_val(elems[2]->codegen());
+      if (argr == NULL) fail("could not determine value of right argument");
+      llvm::Value *lval = Builder.CreateAdd(argl, argr, "addtmp");
+      return var_info_from_value(lval, typ_from_tc(tc_int));
     }
     if (iden->compare("*") == 0) { // handle multiplication
-      return Builder.CreateMul(
-        elems[1]->codegen(),
-        elems[2]->codegen(), "multmp");
+      llvm::Value *argl = vi_get_val(elems[1]->codegen());
+      if (argl == NULL) fail("could not determine value of left argument");
+      llvm::Value *argr = vi_get_val(elems[2]->codegen());
+      if (argr == NULL) fail("could not determine value of right argument");
+      llvm::Value *lval = Builder.CreateMul(argl, argr, "multmp");
+      return var_info_from_value(lval, typ_from_tc(tc_int));
     }
     if (iden->compare("def") == 0) {
       int i;
       // prepare signature
-      Typ rettyp = elems[1]->typgen();
-      std::string *fnname = elems[2]->get_iden();
+      Typ fntyp = typ_from_tc(tc_fn);
+      Typ rettyp = vi_get_typ(elems[1]->codegen());
+      if (rettyp.tc == tc_fail) fail("could not figure out return type");
+      fntyp.t1.push_back(rettyp); // set return typ
+      std::string *fnname = elems[2]->get_iden(); // get the name of the function
+      if (fnname == NULL) fail("function name must be a symbol, not numbers or calls");
       std::vector<Expr *> *arglist = elems[3]->get_elems();
       int arg_num = arglist->size() / 2;
-      std::vector<Typ> *argtyps = new std::vector<Typ>;
       std::vector<llvm::Type *> arg_ltypes;
       std::vector<std::string> argnames;
       for (i = 0; i < arg_num; i++) {
-        argtyps->push_back(arglist->at(2*i)->typgen());
-        arg_ltypes.push_back(typ_conv(argtyps->back()));
-        std::string *argnm = arglist->at(2*i + 1)->get_iden();
+        fntyp.t2.push_back(vi_get_typ(arglist->at(2*i)->codegen()));  // set argument typs TODO: handle case with fail typ
+        arg_ltypes.push_back(typ_conv(fntyp.t1.back())); // set llvm types for arguments
+        std::string *argnm = arglist->at(2*i + 1)->get_iden(); // get argument names
         if (argnm == NULL) fail("parameter names must be identifiers, not numbers or calls");
         argnames.push_back(argnm->substr());
       }
       llvm::FunctionType *FT = llvm::FunctionType::get(
         typ_conv(rettyp), arg_ltypes, false);
       llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, *fnname, TheModule);
-      i = 0;
-      for (auto &Arg : F->args())
+      i = 0; for (auto &Arg : F->args())
         Arg.setName(argnames[i++]);
       // set up fn args and body
       llvm::BasicBlock *BB = llvm::BasicBlock::Create(TheContext, "entry", F);
       Builder.SetInsertPoint(BB);
       stackmap<std::string, VarInfo> nv(NamedValues); // new stackmap for arguments and local variables of this fn...
       NamedValues = &nv;
-      i = 0;
-      for (auto &Arg : F->args())
-        NamedValues->set(std::string(Arg.getName()), var_info_from_value(&Arg, (*argtyps)[i++]));
+      i = 0; for (auto &Arg : F->args())
+        NamedValues->set(std::string(Arg.getName()), var_info_from_value(&Arg, fntyp.t2[i++]));
       // define body
-      llvm::Value *retval = elems[4]->codegen();
+      llvm::Value *retval = vi_get_val(elems[4]->codegen());
+      // TODO: check that retval is not NULL, and the typs match up
       // cleanup
       Builder.CreateRet(retval);
       llvm::verifyFunction(*F);
       NamedValues = nv.pop(); // go back to normal
       // add function to list of defined values
-      NamedValues->set(*fnname, var_info_from_function(F, (Typ){tc_fn, typ_alloc((Typ){tc_int, NULL, NULL}), argtyps})); // TODO: return things other than integers
-      return NULL; // defining a fn yields nil
+      NamedValues->set(*fnname, var_info_from_function(F, fntyp));
+      return var_info_void(); // definition expression yield void
     }
-    //if (iden->compare("print") == 0) {
-    //  std::cout << "putc: " << TheModule.getFunction("puts") << "\n"; // TODO: this broken
-    //}
-  }
-  // Case: user defined function
-  llvm::Function *func = elems[0]->fngen();
-  std::vector<VarInfo> args;
-  args.reserve(size);
-  for (int i = 1; i < size; i++) {
-    args.push_back(var_info_from_value(elems[i]->codegen(), (Typ){tc_int, NULL, NULL})); // TODO: taking non-ints as args not supported yet
-  }
-  // TODO: check argument types and counts
-  std::vector<llvm::Value *> args_llvm;
-  for (int i = 1; i < size; i++) {
-    args_llvm.push_back(args[i-1].val);
-  }
-  return Builder.CreateCall(func, args_llvm, "calltmp");
-}
-
-llvm::Function *ExprCall::fngen() {
-  int size = elems.size();
-  if (size == 0) return NULL; // () yields nil (or something...)
-  std::string *iden = elems[0]->get_iden();
-  if (iden != NULL) { // check for and handle builtins...
-    if (iden->compare("main_program_code") == 0) {
+    if (iden->compare("{main_program_code}") == 0) {
       llvm::Type *rettyp = llvm::Type::getInt64Ty(TheContext);
       std::vector<llvm::Type *> argtyps; // this will stay empty
       llvm::FunctionType *FT = llvm::FunctionType::get(
         rettyp, argtyps, false);
       llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "main", TheModule);
-      llvm::BasicBlock *BB = llvm::BasicBlock::Create(TheContext, "entry2", F);
+      llvm::BasicBlock *BB = llvm::BasicBlock::Create(TheContext, "main_program_code", F);
       Builder.SetInsertPoint(BB);
       llvm::Value *retval;
       for (int i = 1; i < size; i++) {
-        retval = elems[i]->codegen();
+        retval = vi_get_val(elems[i]->codegen());
         Builder.SetInsertPoint(BB);
       }
       retval = llvm::ConstantInt::get(TheContext, llvm::APInt(64, 0, true));
       Builder.CreateRet(retval);
       llvm::verifyFunction(*F);
-      return F;
+      Typ fntyp = typ_from_tc(tc_fn);
+      fntyp.t1.push_back(typ_from_tc(tc_void));
+      return var_info_from_function(F, fntyp);
     }
-    // TODO: lambda expressions, etc
   }
-  fail("can't interpret this as a function!");
-  return NULL;
+  // Case: calling an already defined function
+  VarInfo caller = elems[0]->codegen();
+  llvm::Function *func = vi_get_fn(caller);
+  if (func == NULL) fail("could not call first element of expression as a function");
+  // TODO: check argument typs and counts
+  std::vector<llvm::Value *> args_llvm;
+  args_llvm.reserve(size);
+  for (int i = 1; i < size; i++) {
+    llvm::Value *val = vi_get_val(elems[i]->codegen());
+    if (val == NULL) fail("function was passed a non-value");
+    args_llvm.push_back(val);
+  }
+  llvm::Value *lval = Builder.CreateCall(func, args_llvm, "calltmp");
+  return var_info_from_value(lval, caller.typ.t1[0]);
+
 }
+
 
 // TODO: type checking...
 
@@ -577,7 +537,7 @@ void compile(FILE *source_code) {
   program->show();
   std::cout << "\n parsing complete, compiling...\n";
   prefill_builtins();
-  llvm::Function *main_fn = program->fngen(); // generate code
+  llvm::Function *main_fn = vi_get_fn(program->codegen()); // generate code
   TheModule.print(llvm::errs(), nullptr); // TODO: return llvm ir, or something
 }
 
