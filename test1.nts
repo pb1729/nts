@@ -1,2 +1,7 @@
-(def int affine (int x int y) (+ x (* 4 y)))
-(putchar (affine -3 9)) # equivalent to (putchar 33)
+(def int affine (int x int y)
+  (+ x (* 4 y)))
+(putchar
+  (if 0
+    17
+    (affine -3 9))) # equivalent to (putchar 33)
+

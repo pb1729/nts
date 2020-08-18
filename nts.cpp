@@ -482,6 +482,39 @@ VarInfo ExprCall::codegen() {
       NamedValues->set(*fnname, var_info_from_function(F, fntyp));
       return var_info_void(); // definition expression yield void
     }
+    if (iden->compare("if") == 0) {
+      if (size != 4) fail("if expression takes format of (if (condition) (then) (else))");
+      // condition
+      VarInfo vi_cond = elems[1]->codegen();
+      llvm::Value *bool_cond = Builder.CreateICmpNE( // any int != 0 is true
+        vi_cond.val, llvm::ConstantInt::get(TheContext, llvm::APInt(64, 0, true)), "ifcond");
+      llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
+      // setup blocks
+      llvm::BasicBlock *ThenBB  = llvm::BasicBlock::Create(TheContext, "then", TheFunction); // insert then block into current function
+      llvm::BasicBlock *ElseBB  = llvm::BasicBlock::Create(TheContext, "else");
+      llvm::BasicBlock *MergeBB = llvm::BasicBlock::Create(TheContext, "ifcont");
+      Builder.CreateCondBr(bool_cond, ThenBB, ElseBB);
+      // then
+      Builder.SetInsertPoint(ThenBB);
+      VarInfo vi_then = elems[2]->codegen(); // may change current block
+      Builder.CreateBr(MergeBB);
+      ThenBB = Builder.GetInsertBlock();     // get new value of current block (if changed)
+      // else
+      TheFunction->getBasicBlockList().push_back(ElseBB);
+      Builder.SetInsertPoint(ElseBB);
+      VarInfo vi_else = elems[3]->codegen(); // may change current block
+      Builder.CreateBr(MergeBB);
+      ElseBB = Builder.GetInsertBlock();     // get new value of current block (if changed)
+      // compute return typ (assuming typ of else is same)  TODO: return sum type when types of then/else expressions are unequal
+      Typ anstyp = vi_then.typ;
+      //merge
+      TheFunction->getBasicBlockList().push_back(MergeBB);
+      Builder.SetInsertPoint(MergeBB);
+      llvm::PHINode *ans = Builder.CreatePHI(typ_conv(anstyp), 2, "iftmp");
+      ans->addIncoming(vi_then.val, ThenBB);
+      ans->addIncoming(vi_else.val, ElseBB);
+      return var_info_from_value(ans, anstyp);
+    }
     if (iden->compare("{main_program_code}") == 0) {
       llvm::Type *rettyp = llvm::Type::getInt64Ty(TheContext);
       std::vector<llvm::Type *> argtyps; // this will stay empty
@@ -493,7 +526,7 @@ VarInfo ExprCall::codegen() {
       llvm::Value *retval;
       for (int i = 1; i < size; i++) {
         retval = vi_get_val(elems[i]->codegen());
-        Builder.SetInsertPoint(BB);
+        Builder.SetInsertPoint(&(F->getBasicBlockList().back()));
       }
       retval = llvm::ConstantInt::get(TheContext, llvm::APInt(64, 0, true));
       Builder.CreateRet(retval);
