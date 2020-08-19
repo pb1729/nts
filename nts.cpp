@@ -575,7 +575,7 @@ VarInfo ExprCall::codegen() {
       return var_info_from_value(ans, anstyp);
     }
     if (iden->compare("for") == 0) { // simple for loop expression
-      // simple for loop: (sfor i (max) (expr)) ==> vector of length expr
+      // simple for loop: (for i (max) (expr)) ==> vector of length max
       std::string *loopvar_iden = elems[1]->get_iden(); // name of loop variable...
       if (loopvar_iden == NULL) fail("expected a symbol for the iteration variable name");
       // compute max number of iterations
@@ -585,9 +585,11 @@ VarInfo ExprCall::codegen() {
       llvm::Value *startval = llvm::ConstantInt::get(TheContext, llvm::APInt(64, 0, true));
       llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
       llvm::BasicBlock *PreheaderBB = Builder.GetInsertBlock();
-      llvm::BasicBlock *LoopBB = llvm::BasicBlock::Create(TheContext, "loop", TheFunction);
-      // Insert an explicit fall through from the current block to the LoopBB.
-      Builder.CreateBr(LoopBB);
+      llvm::BasicBlock *LoopBB  = llvm::BasicBlock::Create(TheContext, "loop", TheFunction);
+      llvm::BasicBlock *AfterBB = llvm::BasicBlock::Create(TheContext, "afterloop");
+      // Insert an explicit fall through from the current block to the LoopBB (if maxiter <= 0, we go straight to the end).
+      llvm::Value *skiploop = Builder.CreateICmpSLE(maxiter.val, llvm::ConstantInt::get(TheContext, llvm::APInt(64, 0, true)), "loopcond");
+      Builder.CreateCondBr(skiploop, AfterBB, LoopBB);
       // Start insertion in LoopBB.
       Builder.SetInsertPoint(LoopBB);
       // Start the PHI node with an entry for Start.
@@ -603,13 +605,11 @@ VarInfo ExprCall::codegen() {
           llvm::ConstantInt::get(TheContext, llvm::APInt(64, 1, true)), "nextvar");
       llvm::Value *endcond = Builder.CreateICmpSLT(loopvar_next, maxiter.val, "loopcond");
          // TODO: move above line to before the loop body so we properly handle the maxiter=0 case
-      // Create the "after loop" block and insert it.
       llvm::BasicBlock *LoopEndBB = Builder.GetInsertBlock();
-      llvm::BasicBlock *AfterBB =
-          llvm::BasicBlock::Create(TheContext, "afterloop", TheFunction);
       // Insert the conditional branch into the end of LoopEndBB.
       Builder.CreateCondBr(endcond, LoopBB, AfterBB);
       // Any new code will be inserted in AfterBB.
+      TheFunction->getBasicBlockList().push_back(AfterBB);
       Builder.SetInsertPoint(AfterBB);
       // add other incoming path to loopvar phi node
       loopvar->addIncoming(loopvar_next, LoopEndBB);

@@ -1,4 +1,4 @@
-(for i (+ 1001 -1001)
+(for i 0
   (putchar
     (if (+ i -10)
       (+ 48 i)
