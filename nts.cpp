@@ -600,7 +600,7 @@ VarInfo ExprCall::codegen() {
       VarInfo body = elems[3]->codegen();
       llvm::Value *loopvar_next = Builder.CreateAdd(loopvar, // increment loopvar
           llvm::ConstantInt::get(TheContext, llvm::APInt(64, 1, true)), "nextvar");
-      llvm::Value *endcond = Builder.CreateICmpSGE(loopvar_next, maxiter.val, "loopcond");
+      llvm::Value *endcond = Builder.CreateICmpSLT(loopvar_next, maxiter.val, "loopcond");
          // TODO: move above line to before the loop body so we properly handle the maxiter=0 case
       // Create the "after loop" block and insert it.
       llvm::BasicBlock *LoopEndBB = Builder.GetInsertBlock();
