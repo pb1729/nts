@@ -9,6 +9,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm-c/Core.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -672,7 +673,6 @@ void compile(FILE *source_code) {
   std::cout << "\n parsing complete, compiling...\n";
   prefill_builtins();
   llvm::Function *main_fn = vi_get_fn(program->codegen()); // generate code
-  TheModule.print(llvm::errs(), nullptr); // TODO: return llvm ir, or something
 }
 
 
@@ -692,6 +692,13 @@ int main(int argc, char **argv) {
     return 0;
   }
   compile(fp); // convert fp to llvm ir, and close the file
+  // output the ir to a file
+  if (argc == 2) {
+    TheModule.print(llvm::errs(), nullptr);
+  } else {
+    char *message = NULL;
+    LLVMPrintModuleToFile(llvm::wrap(&TheModule), argv[2], NULL);
+  }
   return 0;
 }
 
