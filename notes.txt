@@ -6,7 +6,7 @@ lli _____.ir
 
 compiling ir to assembly: https://stackoverflow.com/questions/32523847/how-to-make-llvm-bc-file-executable
 llvm-as _______.ll
-llvm-link _______.bc _______.bc
+llvm-link _______.bc -o _______.bc
 llc -filetype=obj _______.bc
 gcc _______.o -o _______
 

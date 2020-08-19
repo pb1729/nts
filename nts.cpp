@@ -278,7 +278,7 @@ public:
   }
   ExprCall *make_iter(std::vector<ExprCall*> &curr_stack) {
     ExprCall *ans = new ExprCall(line);
-    ans->elems.push_back(new ExprIden("for", line));
+    ans->elems.push_back(new ExprIden("tfor", line)); // "tfor" means tensor for loop expression
     ExprCall *itervars = new ExprCall(line);
     curr_stack.push_back(itervars);
     ans->elems.push_back(itervars);
@@ -573,9 +573,48 @@ VarInfo ExprCall::codegen() {
       ans->addIncoming(vi_else.val, ElseBB);
       return var_info_from_value(ans, anstyp);
     }
-    if (iden->compare("sfor") == 0) {
+    if (iden->compare("for") == 0) { // simple for loop expression
       // simple for loop: (sfor i (max) (expr)) ==> vector of length expr
-      // TODO TODO TODO TODO TODO TODO: complete this next!!!!!
+      std::string *loopvar_iden = elems[1]->get_iden(); // name of loop variable...
+      if (loopvar_iden == NULL) fail("expected a symbol for the iteration variable name");
+      // compute max number of iterations
+      VarInfo maxiter = elems[2]->codegen();
+      if (!is_subtyp(maxiter.typ, typ_from_tc(tc_int))) fail("number of iterations must be an integer");
+      // loop starts from 0...
+      llvm::Value *startval = llvm::ConstantInt::get(TheContext, llvm::APInt(64, 0, true));
+      llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
+      llvm::BasicBlock *PreheaderBB = Builder.GetInsertBlock();
+      llvm::BasicBlock *LoopBB = llvm::BasicBlock::Create(TheContext, "loop", TheFunction);
+      // Insert an explicit fall through from the current block to the LoopBB.
+      Builder.CreateBr(LoopBB);
+      // Start insertion in LoopBB.
+      Builder.SetInsertPoint(LoopBB);
+      // Start the PHI node with an entry for Start.
+      llvm::PHINode *loopvar = Builder.CreatePHI(llvm::Type::getInt64Ty(TheContext),
+                                      2, *loopvar_iden);
+      loopvar->addIncoming(startval, PreheaderBB);
+      stackmap<std::string, VarInfo> nv(NamedValues); // new stackmap for arguments and local variables of this fn...
+      NamedValues = &nv;
+      NamedValues->set(*loopvar_iden, var_info_from_value(loopvar, typ_from_tc(tc_int)));
+      // loop body
+      VarInfo body = elems[3]->codegen();
+      llvm::Value *loopvar_next = Builder.CreateAdd(loopvar, // increment loopvar
+          llvm::ConstantInt::get(TheContext, llvm::APInt(64, 1, true)), "nextvar");
+      llvm::Value *endcond = Builder.CreateICmpSGE(loopvar_next, maxiter.val, "loopcond");
+         // TODO: move above line to before the loop body so we properly handle the maxiter=0 case
+      // Create the "after loop" block and insert it.
+      llvm::BasicBlock *LoopEndBB = Builder.GetInsertBlock();
+      llvm::BasicBlock *AfterBB =
+          llvm::BasicBlock::Create(TheContext, "afterloop", TheFunction);
+      // Insert the conditional branch into the end of LoopEndBB.
+      Builder.CreateCondBr(endcond, LoopBB, AfterBB);
+      // Any new code will be inserted in AfterBB.
+      Builder.SetInsertPoint(AfterBB);
+      // add other incoming path to loopvar phi node
+      loopvar->addIncoming(loopvar_next, LoopEndBB);
+      // clean up NamedValues
+      NamedValues = nv.pop();
+      return var_info_void(); // TODO: make for loops return vectors, not void
     }
     if (iden->compare("{main_program_code}") == 0) {
       llvm::Type *rettyp = llvm::Type::getInt64Ty(TheContext);
