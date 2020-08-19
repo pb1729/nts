@@ -160,12 +160,14 @@ enum TypCons { // ways to construct a typ
   tc_int      = 2,
   tc_fn       = 8,
   tc_tup      = 9,
+  tc_tens     = 10,
 };
 
 typedef struct Typ {
   TypCons tc;
   std::vector<struct Typ> t1;
   std::vector<struct Typ> t2;
+  std::vector<int> szs;
 } Typ;
 
 Typ typ_from_tc(TypCons tc) {
@@ -377,9 +379,65 @@ static stackmap<std::string, VarInfo> *NamedValues = &GlobalValues;
 
 llvm::Type *typ_conv(Typ t) {
   // convert Typs to llvm types
-  return llvm::Type::getInt64Ty(TheContext);
-  // TODO: be able to return non-integer types too
+  switch (t.tc) {
+    case tc_void: // void typ
+      return llvm::Type::getVoidTy(TheContext);
+    case tc_int: // integer typ
+      return llvm::Type::getInt64Ty(TheContext);
+    case tc_tup: { // tuple (i.e. struct) typ
+      std::vector<llvm::Type *> elem_ltypes = std::vector<llvm::Type *>();
+      for (Typ subtyp : t.t1) {
+        elem_ltypes.push_back(typ_conv(subtyp));
+      }
+      return llvm::StructType::create(elem_ltypes);
+    }
+    case tc_tens: {
+      int totsz = 1;
+      for (int dimsz : t.szs) {
+        totsz *= dimsz;
+        if (dimsz == -1) // dynamic dimension
+          return llvm::ArrayType::get(typ_conv(t.t1[0]), 0); // TODO: should actually pass dynamic sizes along with array as a struct
+      }
+      return llvm::ArrayType::get(typ_conv(t.t1[0]), totsz);
+    }
+    default:
+      return NULL; // TODO: should probably fail here...
+  }
+  // TODO: arrays, function types, etc
 }
+
+bool is_subtyp(Typ t1, Typ t2) {
+  // determine if t1 can be considered a subtyp of t2
+  switch (t2.tc) {
+    case tc_void:
+      return (t1.tc == tc_void);
+    case tc_int:
+      return (t1.tc == tc_int);
+    case tc_tup: {
+      if (t1.tc != tc_tup) return false;
+      int size = t2.t1.size();
+      if (t1.t1.size() != size) return false;
+      for (int i = 0; i < size; i++) {
+        if (!is_subtyp(t1.t1[i], t2.t1[i])) return false;
+      }
+      return true;
+    }
+    case tc_tens: {
+      if (t1.tc != tc_tens) return false;
+      if (!is_subtyp(t1.t1[0], t2.t1[0])) return false;
+      int dims = t2.szs.size();
+      for (int i = 0; i < dims; i++) {
+        if (t1.szs[i] != t2.szs[i]) {
+          if (t2.szs[i] != -1) return false;
+        } // -1 means arbitrary size, so we can accept any specific size
+      }
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
 
 // prefill some named values:
 void prefill_builtins() {
@@ -514,6 +572,10 @@ VarInfo ExprCall::codegen() {
       ans->addIncoming(vi_then.val, ThenBB);
       ans->addIncoming(vi_else.val, ElseBB);
       return var_info_from_value(ans, anstyp);
+    }
+    if (iden->compare("sfor") == 0) {
+      // simple for loop: (sfor i (max) (expr)) ==> vector of length expr
+      // TODO TODO TODO TODO TODO TODO: complete this next!!!!!
     }
     if (iden->compare("{main_program_code}") == 0) {
       llvm::Type *rettyp = llvm::Type::getInt64Ty(TheContext);
