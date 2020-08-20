@@ -1,0 +1,22 @@
+#TODO: fixed width, can't handle negative ints yet
+#TODO: should implement booleans (typ bit) in nts, so we can have proper comparisons, etc
+
+(def void prn_digit (int digit)
+  (putchar (+ 48 digit)))
+
+(predef int pow (int int))
+
+(def int pow (int a int b)
+  (if b
+    (* a (pow a (+ -1 b)))
+    1))
+
+(def void prn_int (int x int width)
+  (for i width
+    (prn_digit (mod
+      (/ x
+        (pow 10 (- width (+ i 1))))
+        10))))
+(prn_int 917342 12)
+(putchar 10)
+

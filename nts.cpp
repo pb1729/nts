@@ -81,8 +81,8 @@ static int int_val;           // filled in if tok_int
 static int line_no = 1;       // current line number in parsing
 
 bool isalnumsym(char c) {
-  if (isalpha(c) || isdigit(c) || c == '+' || c == '-' ||
-          c == '*' || c == '/' || c == '&' || c == '|' ||
+  if (isalpha(c) || isdigit(c) || c == '+' || c == '-' || c == '_' ||
+          c == '*' || c == '/' || c == '&' || c == '|' || c == '@' ||
           c == '?' || c == '=' || c == '<' || c == '>' || c == '!')
     return true;
   else
@@ -482,6 +482,7 @@ VarInfo ExprCall::codegen() {
   std::string *iden = elems[0]->get_iden();
   if (iden != NULL) { // check for and handle builtins...
     // TODO: assertions for argument number and structure for builtins
+    // TODO: clear out the repetition...
     if (iden->compare("+") == 0) { // handle addition
       llvm::Value *argl = vi_get_val(elems[1]->codegen());
       if (argl == NULL) fail("could not determine value of left argument");
@@ -489,6 +490,21 @@ VarInfo ExprCall::codegen() {
       if (argr == NULL) fail("could not determine value of right argument");
       llvm::Value *lval = Builder.CreateAdd(argl, argr, "addtmp");
       return var_info_from_value(lval, typ_from_tc(tc_int));
+    }
+    if (iden->compare("-") == 0) { // handle negation, subtraction
+      if (elems.size() == 2) { // negation
+        llvm::Value *arg = vi_get_val(elems[1]->codegen());
+        if (arg == NULL) fail("could not determine value of argument");
+        llvm::Value *lval = Builder.CreateNeg(arg, "negtmp");
+        return var_info_from_value(lval, typ_from_tc(tc_int));
+      } else {
+        llvm::Value *argl = vi_get_val(elems[1]->codegen());
+        if (argl == NULL) fail("could not determine value of left argument");
+        llvm::Value *argr = vi_get_val(elems[2]->codegen());
+        if (argr == NULL) fail("could not determine value of right argument");
+        llvm::Value *lval = Builder.CreateSub(argl, argr, "subtmp");
+        return var_info_from_value(lval, typ_from_tc(tc_int));
+      }
     }
     if (iden->compare("*") == 0) { // handle multiplication
       llvm::Value *argl = vi_get_val(elems[1]->codegen());
@@ -498,13 +514,55 @@ VarInfo ExprCall::codegen() {
       llvm::Value *lval = Builder.CreateMul(argl, argr, "multmp");
       return var_info_from_value(lval, typ_from_tc(tc_int));
     }
+    if (iden->compare("/") == 0) { // handle division
+      llvm::Value *argl = vi_get_val(elems[1]->codegen());
+      if (argl == NULL) fail("could not determine value of left argument");
+      llvm::Value *argr = vi_get_val(elems[2]->codegen());
+      if (argr == NULL) fail("could not determine value of right argument");
+      llvm::Value *lval = Builder.CreateSDiv(argl, argr, "divtmp"); // non-exact signed division
+      return var_info_from_value(lval, typ_from_tc(tc_int));
+    }
+    if (iden->compare("mod") == 0) { // handle modulus function
+      llvm::Value *argl = vi_get_val(elems[1]->codegen());
+      if (argl == NULL) fail("could not determine value of left argument");
+      llvm::Value *argr = vi_get_val(elems[2]->codegen());
+      if (argr == NULL) fail("could not determine value of right argument");
+      llvm::Value *lval = Builder.CreateSRem(argl, argr, "modtmp"); // signed modulus
+      return var_info_from_value(lval, typ_from_tc(tc_int));
+    }
+    if (iden->compare("predef") == 0) { // allow for predefining of functions (for externs, recursion, mutual recursion, etc.)
+      Typ fntyp = typ_from_tc(tc_fn);
+      Typ rettyp = vi_get_typ(elems[1]->codegen());
+      if (rettyp.tc == tc_fail) fail("could not figure out return type");
+      fntyp.t2.push_back(rettyp); // set return typ
+      std::string *fnname = elems[2]->get_iden(); // get the name of the function
+      if (fnname == NULL) fail("function name must be a symbol, not numbers or calls");
+      std::vector<Expr *> *arglist = elems[3]->get_elems();
+      int arg_num = arglist->size();
+      std::vector<llvm::Type *> arg_ltypes;
+      for (int i = 0; i < arg_num; i++) {
+        Typ argtyp = vi_get_typ(arglist->at(i)->codegen());
+        fntyp.t1.push_back(argtyp);  // set argument typs
+        arg_ltypes.push_back(typ_conv(argtyp));
+      }
+      llvm::FunctionType *FT = llvm::FunctionType::get(
+        typ_conv(rettyp), arg_ltypes, false);
+      llvm::Function *F = TheModule.getFunction(*fnname);
+      if (!F) { // if F does not already exist, we create it
+        F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, *fnname, TheModule);
+      } else {
+        // TODO: check that signatures match
+      }
+      NamedValues->set(*fnname, var_info_from_function(F, fntyp));
+      return var_info_void();
+    }
     if (iden->compare("def") == 0) {
       int i;
       // prepare signature
       Typ fntyp = typ_from_tc(tc_fn);
       Typ rettyp = vi_get_typ(elems[1]->codegen());
       if (rettyp.tc == tc_fail) fail("could not figure out return type");
-      fntyp.t1.push_back(rettyp); // set return typ
+      fntyp.t2.push_back(rettyp); // set return typ
       std::string *fnname = elems[2]->get_iden(); // get the name of the function
       if (fnname == NULL) fail("function name must be a symbol, not numbers or calls");
       std::vector<Expr *> *arglist = elems[3]->get_elems();
@@ -512,15 +570,23 @@ VarInfo ExprCall::codegen() {
       std::vector<llvm::Type *> arg_ltypes;
       std::vector<std::string> argnames;
       for (i = 0; i < arg_num; i++) {
-        fntyp.t2.push_back(vi_get_typ(arglist->at(2*i)->codegen()));  // set argument typs TODO: handle case with fail typ
-        arg_ltypes.push_back(typ_conv(fntyp.t1.back())); // set llvm types for arguments
+        Typ argtyp = vi_get_typ(arglist->at(2*i)->codegen());
+        fntyp.t1.push_back(argtyp);  // set argument typs TODO: handle case with fail typ
+        arg_ltypes.push_back(typ_conv(argtyp)); // set llvm types for arguments
         std::string *argnm = arglist->at(2*i + 1)->get_iden(); // get argument names
         if (argnm == NULL) fail("parameter names must be identifiers, not numbers or calls");
         argnames.push_back(argnm->substr());
       }
       llvm::FunctionType *FT = llvm::FunctionType::get(
         typ_conv(rettyp), arg_ltypes, false);
-      llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, *fnname, TheModule);
+      
+      llvm::Function *F = TheModule.getFunction(*fnname);
+      if (!F) { // if F does not already exist, we create it
+        F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, *fnname, TheModule);
+      } else {
+        // TODO: check that signatures match
+      }
+      // TODO: above code is redundant with predef, and should be pulled out info function or something...
       i = 0; for (auto &Arg : F->args())
         Arg.setName(argnames[i++]);
       // set up fn args and body
@@ -529,17 +595,19 @@ VarInfo ExprCall::codegen() {
       stackmap<std::string, VarInfo> nv(NamedValues); // new stackmap for arguments and local variables of this fn...
       NamedValues = &nv;
       i = 0; for (auto &Arg : F->args())
-        NamedValues->set(std::string(Arg.getName()), var_info_from_value(&Arg, fntyp.t2[i++]));
+        NamedValues->set(std::string(Arg.getName()), var_info_from_value(&Arg, fntyp.t1[i++]));
       // define body
-      llvm::Value *retval = vi_get_val(elems[4]->codegen());
-      // TODO: check that retval is not NULL, and the typs match up
+      VarInfo vi_ret = elems[4]->codegen();
+      llvm::Value *retval = vi_get_val(vi_ret);
+      if (fntyp.t2[0].tc == tc_void) retval = NULL; // handle return from void function (can ignore type of body function)
+      // TODO: check that the typs match up
       // cleanup
       Builder.CreateRet(retval);
       llvm::verifyFunction(*F);
       NamedValues = nv.pop(); // go back to normal
       // add function to list of defined values
       NamedValues->set(*fnname, var_info_from_function(F, fntyp));
-      return var_info_void(); // definition expression yield void
+      return var_info_void(); // definition expressions yield void
     }
     if (iden->compare("if") == 0) {
       if (size != 4) fail("if expression takes format of (if (condition) (then) (else))");
@@ -634,13 +702,13 @@ VarInfo ExprCall::codegen() {
       Builder.CreateRet(retval);
       llvm::verifyFunction(*F);
       Typ fntyp = typ_from_tc(tc_fn);
-      fntyp.t1.push_back(typ_from_tc(tc_void));
+      fntyp.t2.push_back(typ_from_tc(tc_int));
       return var_info_from_function(F, fntyp);
     }
   }
   // Case: calling an already defined function
-  VarInfo caller = elems[0]->codegen();
-  llvm::Function *func = vi_get_fn(caller);
+  VarInfo callee = elems[0]->codegen();
+  llvm::Function *func = vi_get_fn(callee);
   if (func == NULL) fail("could not call first element of expression as a function");
   // TODO: check argument typs and counts
   std::vector<llvm::Value *> args_llvm;
@@ -650,8 +718,8 @@ VarInfo ExprCall::codegen() {
     if (val == NULL) fail("function was passed a non-value");
     args_llvm.push_back(val);
   }
-  llvm::Value *lval = Builder.CreateCall(func, args_llvm, "calltmp");
-  return var_info_from_value(lval, caller.typ.t1[0]);
+  llvm::Value *lval = Builder.CreateCall(func, args_llvm);
+  return var_info_from_value(lval, callee.typ.t2[0]);
 
 }
 
