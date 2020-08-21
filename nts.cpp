@@ -179,17 +179,18 @@ Typ typ_from_tc(TypCons tc) {
 }
 
 typedef struct VarInfo {
-  Typ typ;
-  llvm::Value *val;
-  llvm::Function *fun;
-  Typ typval;
+  Typ typ;              // The typ of this var
+  llvm::Value *val;     // The value of this var, if it is a value
+  llvm::Function *fun;  // The value of this var, if it is a function
+  Typ typval;           // The value of this var, if it is a typ
+  llvm::Value *loc;     // The loaction of this var, if there is location info associated eg. array index, (a 133)
 } VarInfo;
 
-VarInfo var_info_from_value(llvm::Value *val, Typ typ)      { return (VarInfo){typ, val,  NULL, typ_from_tc(tc_fail)}; }
-VarInfo var_info_from_function(llvm::Function *fn, Typ typ) { return (VarInfo){typ, NULL, fn,   typ_from_tc(tc_fail)}; }
-VarInfo var_info_from_typ(Typ tp)          { return (VarInfo){typ_from_tc(tc_typ),  NULL, NULL, tp                  }; }
-VarInfo var_info_fail()                    { return (VarInfo){typ_from_tc(tc_fail), NULL, NULL, typ_from_tc(tc_fail)}; }
-VarInfo var_info_void()                    { return (VarInfo){typ_from_tc(tc_void), NULL, NULL, typ_from_tc(tc_fail)}; }
+VarInfo var_info_from_value(llvm::Value *val, Typ typ)      { return (VarInfo){typ, val,  NULL, typ_from_tc(tc_fail), NULL}; }
+VarInfo var_info_from_function(llvm::Function *fn, Typ typ) { return (VarInfo){typ, NULL, fn,   typ_from_tc(tc_fail), NULL}; }
+VarInfo var_info_from_typ(Typ tp)          { return (VarInfo){typ_from_tc(tc_typ),  NULL, NULL, tp                  , NULL}; }
+VarInfo var_info_fail()                    { return (VarInfo){typ_from_tc(tc_fail), NULL, NULL, typ_from_tc(tc_fail), NULL}; }
+VarInfo var_info_void()                    { return (VarInfo){typ_from_tc(tc_void), NULL, NULL, typ_from_tc(tc_fail), NULL}; }
 
 llvm::Value *vi_get_val(VarInfo vi) {
   switch (vi.typ.tc) {
@@ -502,6 +503,7 @@ VarInfo ExprCall::codegen() {
   if (iden != NULL) { // check for and handle builtins...
     // TODO: assertions for argument number and structure for builtins
     // TODO: clear out the repetition...
+    // TODO: add floats, handle overloading (of bits, ints, eventually floats)
     if (iden->compare("+") == 0) { // handle addition
       llvm::Value *argl = vi_get_val(elems[1]->codegen());
       if (argl == NULL) fail("could not determine value of left argument");
