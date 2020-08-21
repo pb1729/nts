@@ -1,25 +1,38 @@
 #TODO: fixed width, can't handle negative ints yet
 #TODO: should implement booleans (typ bit) in nts, so we can have proper comparisons, etc
 
-(def void prn_digit (int digit)
-  (putchar (+ 48 digit)))
+(def int prn_digit (int digit)
+  (if (=< 0 digit)
+    (putchar (+ 48 digit))
+    (putchar (- 48 digit))))
 
 (predef int pow (int int))
 
 (def int pow (int a int b)
-  (if b
+  (if (> b 0)
     (* a (pow a (+ -1 b)))
     1))
 
 (def void prn_int (int x int width)
   (for i width
-    (prn_digit (mod 10
-      (/ x
-        (pow 10 (- width (+ i 1))))))))
-(prn_int 917342 12)
+    (if (= i 0)
+      (if (< x 0)
+        (putchar 45)
+        (putchar 43))
+      (prn_digit (/r
+        (/ x
+          (pow 10 (- width (+ i 1))))
+        10)))))
+(prn_int 917342 12) # test number
 (putchar 10)
-(prn_int (mod 3 -8) 12)
+(prn_int -7301002 12) # test negative number
 (putchar 10)
-(prn_int (/r -8 3) 12)
+(prn_int (mod 3 -8) 12) # test mod on negative num
 (putchar 10)
+(prn_int (/r -8 3) 12) # test r on negative num
+(putchar 10)
+(prn_int (- 551) 12) # test negation...
+(putchar 10)
+
+# TODO: check if negation is bitwise or not... (bitwise should be !, integer negation should be -)
 

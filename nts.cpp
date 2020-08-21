@@ -156,12 +156,13 @@ static int gettok(FILE *f) {
 
 enum TypCons { // ways to construct a typ
   tc_fail     = -1, // denotes an invalid typ
-  tc_void     = 0,
+  tc_void     = 0, // void typ
   tc_typ      = 1, // the typ of any other typ
-  tc_int      = 2,
-  tc_fn       = 8,
-  tc_tup      = 9,
-  tc_tens     = 10,
+  tc_bit      = 2, // 1 bit (boolean)
+  tc_int      = 3, // 64 bit integer
+  tc_fn       = 8,  // function
+  tc_tup      = 9,  // tuple
+  tc_tens     = 10, // tensor
 };
 
 typedef struct Typ {
@@ -454,8 +455,13 @@ bool is_subtyp(Typ t1, Typ t2) {
 // prefill some named values:
 void prefill_builtins() {
   // basic type definitions:
+  NamedValues->set("bit", var_info_from_typ(typ_from_tc(tc_bit)));
   NamedValues->set("int", var_info_from_typ(typ_from_tc(tc_int)));
   NamedValues->set("void", var_info_from_typ(typ_from_tc(tc_void)));
+  
+  // define true / false
+  NamedValues->set("false", var_info_from_value(bconst(0), typ_from_tc(tc_bit)));
+  NamedValues->set("true",  var_info_from_value(bconst(1), typ_from_tc(tc_bit)));
   
   // steal the putchar function from C
   std::vector<llvm::Type *> args(1, llvm::Type::getInt64Ty(TheContext));
@@ -467,6 +473,8 @@ void prefill_builtins() {
   llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "putchar", TheModule);
   NamedValues->set("putchar", var_info_from_function(F, fntyp));
 }
+
+
 
 // codegen for the various expression types:
 
@@ -551,6 +559,55 @@ VarInfo ExprCall::codegen() {
       lval = Builder.CreateSRem(lval, argl, "modtmp"); // positive remainder
       return var_info_from_value(lval, typ_from_tc(tc_int));
     }
+    if (iden->compare("=") == 0) { // compare for equality
+      llvm::Value *argl = vi_get_val(elems[1]->codegen());
+      if (argl == NULL) fail("could not determine value of left argument");
+      llvm::Value *argr = vi_get_val(elems[2]->codegen());
+      if (argr == NULL) fail("could not determine value of right argument");
+      llvm::Value *lval = Builder.CreateICmpEQ(argl, argr, "compeqtmp");
+      return var_info_from_value(lval, typ_from_tc(tc_bit));
+    }
+    if (iden->compare("!=") == 0) { // compare for non-equality
+      llvm::Value *argl = vi_get_val(elems[1]->codegen());
+      if (argl == NULL) fail("could not determine value of left argument");
+      llvm::Value *argr = vi_get_val(elems[2]->codegen());
+      if (argr == NULL) fail("could not determine value of right argument");
+      llvm::Value *lval = Builder.CreateICmpEQ(argl, argr, "compnetmp");
+      return var_info_from_value(lval, typ_from_tc(tc_bit));
+    }
+    if (iden->compare(">") == 0) { // compare greater than
+      llvm::Value *argl = vi_get_val(elems[1]->codegen());
+      if (argl == NULL) fail("could not determine value of left argument");
+      llvm::Value *argr = vi_get_val(elems[2]->codegen());
+      if (argr == NULL) fail("could not determine value of right argument");
+      llvm::Value *lval = Builder.CreateICmpSGT(argl, argr, "compgttmp");
+      return var_info_from_value(lval, typ_from_tc(tc_bit));
+    }
+    if (iden->compare(">=") == 0) { // compare greater than or equal
+      llvm::Value *argl = vi_get_val(elems[1]->codegen());
+      if (argl == NULL) fail("could not determine value of left argument");
+      llvm::Value *argr = vi_get_val(elems[2]->codegen());
+      if (argr == NULL) fail("could not determine value of right argument");
+      llvm::Value *lval = Builder.CreateICmpSGE(argl, argr, "compgetmp");
+      return var_info_from_value(lval, typ_from_tc(tc_bit));
+    }
+    if (iden->compare("<") == 0) { // compare less than
+      llvm::Value *argl = vi_get_val(elems[1]->codegen());
+      if (argl == NULL) fail("could not determine value of left argument");
+      llvm::Value *argr = vi_get_val(elems[2]->codegen());
+      if (argr == NULL) fail("could not determine value of right argument");
+      llvm::Value *lval = Builder.CreateICmpSLT(argl, argr, "complttmp");
+      return var_info_from_value(lval, typ_from_tc(tc_bit));
+    }
+    if (iden->compare("=<") == 0) { // compare less than or equal
+      llvm::Value *argl = vi_get_val(elems[1]->codegen());
+      if (argl == NULL) fail("could not determine value of left argument");
+      llvm::Value *argr = vi_get_val(elems[2]->codegen());
+      if (argr == NULL) fail("could not determine value of right argument");
+      llvm::Value *lval = Builder.CreateICmpSLE(argl, argr, "completmp");
+      return var_info_from_value(lval, typ_from_tc(tc_bit));
+    }
+    // TODO: bitwise &, |, ^, !. (for both bit, int typs)
     if (iden->compare("predef") == 0) { // allow for predefining of functions (for externs, recursion, mutual recursion, etc.)
       Typ fntyp = typ_from_tc(tc_fn);
       Typ rettyp = vi_get_typ(elems[1]->codegen());
@@ -634,8 +691,8 @@ VarInfo ExprCall::codegen() {
       if (size != 4) fail("if expression takes format of (if (condition) (then) (else))");
       // condition
       VarInfo vi_cond = elems[1]->codegen();
-      llvm::Value *bool_cond = Builder.CreateICmpNE( // any int != 0 is true
-        vi_cond.val, iconst(0), "ifcond");
+      llvm::Value *bool_cond = vi_cond.val;
+      // figure out where we are
       llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
       // setup blocks
       llvm::BasicBlock *ThenBB  = llvm::BasicBlock::Create(TheContext, "then", TheFunction); // insert then block into current function
