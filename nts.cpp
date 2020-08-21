@@ -378,6 +378,17 @@ static llvm::Module TheModule("my_module", TheContext);
 static stackmap<std::string, VarInfo> GlobalValues(NULL);
 static stackmap<std::string, VarInfo> *NamedValues = &GlobalValues;
 
+
+// useful function for generating int constants:
+llvm::Value *iconst(int val) {
+  return llvm::ConstantInt::get(TheContext, llvm::APInt(64, val, true));
+}
+// useful function for generating bit constants:
+llvm::Value *bconst(int val) {
+  return llvm::ConstantInt::get(TheContext, llvm::APInt(1, val, true));
+}
+
+
 llvm::Type *typ_conv(Typ t) {
   // convert Typs to llvm types
   switch (t.tc) {
@@ -461,7 +472,7 @@ void prefill_builtins() {
 
 
 VarInfo ExprInt::codegen() {
-  llvm::Value *lval = llvm::ConstantInt::get(TheContext, llvm::APInt(64, val, true));
+  llvm::Value *lval = iconst(val);
   return var_info_from_value(lval, typ_from_tc(tc_int));
 }
 
@@ -522,12 +533,22 @@ VarInfo ExprCall::codegen() {
       llvm::Value *lval = Builder.CreateSDiv(argl, argr, "divtmp"); // non-exact signed division
       return var_info_from_value(lval, typ_from_tc(tc_int));
     }
-    if (iden->compare("mod") == 0) { // handle modulus function
+    if (iden->compare("/r") == 0) { // remainder after division
       llvm::Value *argl = vi_get_val(elems[1]->codegen());
       if (argl == NULL) fail("could not determine value of left argument");
       llvm::Value *argr = vi_get_val(elems[2]->codegen());
       if (argr == NULL) fail("could not determine value of right argument");
-      llvm::Value *lval = Builder.CreateSRem(argl, argr, "modtmp"); // signed modulus
+      llvm::Value *lval = Builder.CreateSRem(argl, argr, "remtmp");
+      return var_info_from_value(lval, typ_from_tc(tc_int));
+    }
+    if (iden->compare("mod") == 0) { // handle modulus function (mod 3 x) gives y in {0,1,2} st y = x (mod 3)
+      llvm::Value *argl = vi_get_val(elems[1]->codegen());
+      if (argl == NULL) fail("could not determine value of left argument"); // modulus
+      llvm::Value *argr = vi_get_val(elems[2]->codegen());
+      if (argr == NULL) fail("could not determine value of right argument"); // x
+      llvm::Value *lval = Builder.CreateSRem(argr, argl, "modtmpsgn"); // possibly negative remainder
+      lval = Builder.CreateAdd(lval, argl, "modtmpadd");
+      lval = Builder.CreateSRem(lval, argl, "modtmp"); // positive remainder
       return var_info_from_value(lval, typ_from_tc(tc_int));
     }
     if (iden->compare("predef") == 0) { // allow for predefining of functions (for externs, recursion, mutual recursion, etc.)
@@ -614,7 +635,7 @@ VarInfo ExprCall::codegen() {
       // condition
       VarInfo vi_cond = elems[1]->codegen();
       llvm::Value *bool_cond = Builder.CreateICmpNE( // any int != 0 is true
-        vi_cond.val, llvm::ConstantInt::get(TheContext, llvm::APInt(64, 0, true)), "ifcond");
+        vi_cond.val, iconst(0), "ifcond");
       llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
       // setup blocks
       llvm::BasicBlock *ThenBB  = llvm::BasicBlock::Create(TheContext, "then", TheFunction); // insert then block into current function
@@ -650,13 +671,13 @@ VarInfo ExprCall::codegen() {
       VarInfo maxiter = elems[2]->codegen();
       if (!is_subtyp(maxiter.typ, typ_from_tc(tc_int))) fail("number of iterations must be an integer");
       // loop starts from 0...
-      llvm::Value *startval = llvm::ConstantInt::get(TheContext, llvm::APInt(64, 0, true));
+      llvm::Value *startval = iconst(0);
       llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
       llvm::BasicBlock *PreheaderBB = Builder.GetInsertBlock();
       llvm::BasicBlock *LoopBB  = llvm::BasicBlock::Create(TheContext, "loop", TheFunction);
       llvm::BasicBlock *AfterBB = llvm::BasicBlock::Create(TheContext, "afterloop");
       // Insert an explicit fall through from the current block to the LoopBB (if maxiter <= 0, we go straight to the end).
-      llvm::Value *skiploop = Builder.CreateICmpSLE(maxiter.val, llvm::ConstantInt::get(TheContext, llvm::APInt(64, 0, true)), "loopcond");
+      llvm::Value *skiploop = Builder.CreateICmpSLE(maxiter.val, iconst(0), "loopcond");
       Builder.CreateCondBr(skiploop, AfterBB, LoopBB);
       // Start insertion in LoopBB.
       Builder.SetInsertPoint(LoopBB);
@@ -670,9 +691,8 @@ VarInfo ExprCall::codegen() {
       // loop body
       VarInfo body = elems[3]->codegen();
       llvm::Value *loopvar_next = Builder.CreateAdd(loopvar, // increment loopvar
-          llvm::ConstantInt::get(TheContext, llvm::APInt(64, 1, true)), "nextvar");
+          iconst(1), "nextvar");
       llvm::Value *endcond = Builder.CreateICmpSLT(loopvar_next, maxiter.val, "loopcond");
-         // TODO: move above line to before the loop body so we properly handle the maxiter=0 case
       llvm::BasicBlock *LoopEndBB = Builder.GetInsertBlock();
       // Insert the conditional branch into the end of LoopEndBB.
       Builder.CreateCondBr(endcond, LoopBB, AfterBB);
@@ -698,7 +718,7 @@ VarInfo ExprCall::codegen() {
         retval = vi_get_val(elems[i]->codegen());
         Builder.SetInsertPoint(&(F->getBasicBlockList().back()));
       }
-      retval = llvm::ConstantInt::get(TheContext, llvm::APInt(64, 0, true));
+      retval = iconst(0);
       Builder.CreateRet(retval);
       llvm::verifyFunction(*F);
       Typ fntyp = typ_from_tc(tc_fn);

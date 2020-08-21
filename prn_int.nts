@@ -13,10 +13,13 @@
 
 (def void prn_int (int x int width)
   (for i width
-    (prn_digit (mod
+    (prn_digit (mod 10
       (/ x
-        (pow 10 (- width (+ i 1))))
-        10))))
+        (pow 10 (- width (+ i 1))))))))
 (prn_int 917342 12)
+(putchar 10)
+(prn_int (mod 3 -8) 12)
+(putchar 10)
+(prn_int (/r -8 3) 12)
 (putchar 10)
 
