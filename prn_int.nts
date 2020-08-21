@@ -26,11 +26,10 @@
           (pow 10 (- width (+ i 1))))
         10)))))
 
-#(def void putint (int x) # TODO: make this work...
-#  (for i 2
-#    (if (= i 0)
-#      (prn_int i 24)
-#      (putch 10))))
+(def void putint (int x) # TODO: make this work...
+  (do
+    (prn_int x 20)
+    (putch 10)))
 
 (prn_int 917342 12) # test number
 (putchar 10)
@@ -44,8 +43,6 @@
 (putchar 10)
 (prn_int (- 551) 12) # test negation...
 (putchar 10)
-#(prn_int 12345 40) # test overflow in pow
-#(putchar 10)
-#(for i 100
-#  (prn_int (pow 11 i) 20))
+(for i 60
+  (putint (pow 10 i)))
 

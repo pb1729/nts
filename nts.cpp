@@ -764,6 +764,15 @@ VarInfo ExprCall::codegen() {
       NamedValues = nv.pop();
       return var_info_void(); // TODO: make for loops return vectors, not void
     }
+    if (iden->compare("do") == 0) { // do all the things in a block, return the last one
+      llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
+      VarInfo ans;
+      for (int i = 1; i < size; i++) {
+        ans = elems[i]->codegen();
+        Builder.SetInsertPoint(&(TheFunction->getBasicBlockList().back()));
+      }
+      return ans;
+    }
     if (iden->compare("{main_program_code}") == 0) {
       llvm::Type *rettyp = llvm::Type::getInt64Ty(TheContext);
       std::vector<llvm::Type *> argtyps; // this will stay empty
