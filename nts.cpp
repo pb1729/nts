@@ -155,11 +155,11 @@ static int gettok(FILE *f) {
 
 
 enum TypCons { // ways to construct a typ
-  tc_fail     = -1, // denotes an invalid typ
-  tc_void     = 0, // void typ
-  tc_typ      = 1, // the typ of any other typ
-  tc_bit      = 2, // 1 bit (boolean)
-  tc_int      = 3, // 64 bit integer
+  tc_fail     = 0, // denotes an invalid typ, we choose integer rep of 0 so it is the default
+  tc_void     = 1, // void typ
+  tc_typ      = 2, // the typ of any other typ
+  tc_bit      = 3, // 1 bit (boolean)
+  tc_int      = 4, // 64 bit integer
   tc_fn       = 8,  // function
   tc_tup      = 9,  // tuple
   tc_tens     = 10, // tensor
@@ -183,14 +183,39 @@ typedef struct VarInfo {
   llvm::Value *val;     // The value of this var, if it is a value
   llvm::Function *fun;  // The value of this var, if it is a function
   Typ typval;           // The value of this var, if it is a typ
-  llvm::Value *loc;     // The loaction of this var, if there is location info associated eg. array index, (a 133)
+  bool fromloc;         // True iff we need to get the value of this var by dereferencing loc
+  llvm::Value *loc;     // The location of this var, if there is location info associated eg. array index, (a 133)
+  std::vector<llvm::Value *> dimvals; // the values of the unknown indices of the var, if it is a tensor
 } VarInfo;
 
-VarInfo var_info_from_value(llvm::Value *val, Typ typ)      { return (VarInfo){typ, val,  NULL, typ_from_tc(tc_fail), NULL}; }
-VarInfo var_info_from_function(llvm::Function *fn, Typ typ) { return (VarInfo){typ, NULL, fn,   typ_from_tc(tc_fail), NULL}; }
-VarInfo var_info_from_typ(Typ tp)          { return (VarInfo){typ_from_tc(tc_typ),  NULL, NULL, tp                  , NULL}; }
-VarInfo var_info_fail()                    { return (VarInfo){typ_from_tc(tc_fail), NULL, NULL, typ_from_tc(tc_fail), NULL}; }
-VarInfo var_info_void()                    { return (VarInfo){typ_from_tc(tc_void), NULL, NULL, typ_from_tc(tc_fail), NULL}; }
+VarInfo var_info_from_value(llvm::Value *val, Typ typ) { 
+  VarInfo ans;
+  ans.typ = typ;
+  ans.val = val;
+  return ans;
+}
+VarInfo var_info_from_function(llvm::Function *fun, Typ typ) { 
+  VarInfo ans;
+  ans.typ = typ;
+  ans.fun  = fun;
+  return ans;
+}
+VarInfo var_info_from_typ(Typ typval) {
+  VarInfo ans;
+  ans.typ = typ_from_tc(tc_typ);
+  ans.typval = typval;
+  return ans;
+}
+VarInfo var_info_fail() {
+  VarInfo ans;
+  ans.typ = typ_from_tc(tc_fail);
+  return ans;
+}
+VarInfo var_info_void() {
+  VarInfo ans;
+  ans.typ = typ_from_tc(tc_void);
+  return ans;
+}
 
 llvm::Value *vi_get_val(VarInfo vi) {
   switch (vi.typ.tc) {
@@ -767,11 +792,26 @@ VarInfo ExprCall::codegen() {
     if (iden->compare("do") == 0) { // do all the things in a block, return the last one
       llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
       VarInfo ans;
+      stackmap<std::string, VarInfo> nv(NamedValues); // new stackmap for variables local to this do block
+      NamedValues = &nv;
       for (int i = 1; i < size; i++) {
         ans = elems[i]->codegen();
         Builder.SetInsertPoint(&(TheFunction->getBasicBlockList().back()));
       }
+      // clean up NamedValues
+      NamedValues = nv.pop();
       return ans;
+    }
+    if (iden->compare("make") == 0) { // allocate a new variable...
+      fail("'make' not implemented");
+      std::string *iden = elems[2]->get_iden();
+      if (iden == NULL) fail("should provide symbol to identify variable");
+      VarInfo vartyp = elems[1]->codegen();
+      return var_info_void();
+    }
+    if (iden->compare("<-") == 0) { // assign to a variable...
+      fail("'<-' not implemented");
+      return var_info_fail();
     }
     if (iden->compare("{main_program_code}") == 0) {
       llvm::Type *rettyp = llvm::Type::getInt64Ty(TheContext);
