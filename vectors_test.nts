@@ -1,2 +1,4 @@
 (do
-  (make (int 2 (* 4 5)) a))
+  (make (int (+ 3 4) 173 (+ 6 7)) a)
+  (make int b)
+  (make (int 2 3 5 7 11) c))

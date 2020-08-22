@@ -490,10 +490,10 @@ VarInfo alloc_typ(VarInfo vi_typ) {
         if (dimsz >= 0) prod_sz *= dimsz;
       }
       llvm::Value *finalsz = iconst(prod_sz);
-      for (llvm::Value *dimsz2 : ans.dimvals) { // dynamic dim sizes
+      for (llvm::Value *dimsz2 : vi_typ.dimvals) { // dynamic dim sizes
         finalsz = Builder.CreateMul(finalsz, dimsz2, "computeszmultmp");
       }
-      llvm::Value *allocinst = Builder.CreateAlloca(typ_conv(vi_typ.typval), 0, finalsz, "alloctenstemp");
+      llvm::Value *allocinst = Builder.CreateAlloca(typ_conv(vi_typ.typval.t1[0]), 0, finalsz, "alloctens");
       ans.typ = vi_typ.typval;
       ans.val = allocinst;
       return ans;
