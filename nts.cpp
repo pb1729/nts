@@ -261,6 +261,7 @@ public:
   virtual ~Expr() {}
   virtual void show() {}
   virtual ExprCall *make_iter(std::vector<ExprCall *> &curr_stack) { return NULL; } // throw error
+  virtual int *get_int() { return NULL; }
   virtual std::string *get_iden() { return NULL; }
   virtual std::vector<Expr *> *get_elems() { return NULL; }
   virtual VarInfo codegen() = 0;
@@ -275,6 +276,7 @@ public:
   int val;
   ExprInt(int val, int line) : val(val), Expr(1, line) {}
   void show() {std::cout << " " << val << " ";}
+  int *get_int() { return &val; }
   virtual VarInfo codegen();
 };
 
@@ -478,6 +480,34 @@ bool is_subtyp(Typ t1, Typ t2) {
 }
 
 
+VarInfo alloc_typ(VarInfo vi_typ) {
+  // allocate space for a varible with typ (and any auxilliary info) given by typ
+  VarInfo ans;
+  switch (vi_typ.typval.tc) {
+    case tc_tens: {
+      int prod_sz = 1;
+      for (int dimsz : vi_typ.typval.szs) { // static dim sizes
+        if (dimsz >= 0) prod_sz *= dimsz;
+      }
+      llvm::Value *finalsz = iconst(prod_sz);
+      for (llvm::Value *dimsz2 : ans.dimvals) { // dynamic dim sizes
+        finalsz = Builder.CreateMul(finalsz, dimsz2, "computeszmultmp");
+      }
+      llvm::Value *allocinst = Builder.CreateAlloca(typ_conv(vi_typ.typval), 0, finalsz, "alloctenstemp");
+      ans.typ = vi_typ.typval;
+      ans.val = allocinst;
+      return ans;
+    }
+    default: {
+      llvm::Value *allocinst = Builder.CreateAlloca(typ_conv(vi_typ.typval), 0, iconst(1));
+      ans.typ = vi_typ.typval;
+      ans.val = allocinst;
+      return ans;
+    }
+  }
+}
+
+
 // prefill some named values:
 void prefill_builtins() {
   // basic type definitions:
@@ -498,6 +528,7 @@ void prefill_builtins() {
     llvm::Type::getInt64Ty(TheContext), args, false);
   llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "putchar", TheModule);
   NamedValues->set("putchar", var_info_from_function(F, fntyp));
+  // TODO: steal malloc, free from C
 }
 
 
@@ -803,10 +834,11 @@ VarInfo ExprCall::codegen() {
       return ans;
     }
     if (iden->compare("make") == 0) { // allocate a new variable...
-      fail("'make' not implemented");
       std::string *iden = elems[2]->get_iden();
       if (iden == NULL) fail("should provide symbol to identify variable");
       VarInfo vartyp = elems[1]->codegen();
+      if (vartyp.typ.tc != tc_typ) fail("should provide typ of variable to make");
+      NamedValues->set(*iden, alloc_typ(vartyp));
       return var_info_void();
     }
     if (iden->compare("<-") == 0) { // assign to a variable...
@@ -834,21 +866,50 @@ VarInfo ExprCall::codegen() {
       return var_info_from_function(F, fntyp);
     }
   }
-  // Case: calling an already defined function
+  // Case: calling an already defined function / accessing an element of a tensor (TODO) / constructing a tensor typ
   VarInfo callee = elems[0]->codegen();
-  llvm::Function *func = vi_get_fn(callee);
-  if (func == NULL) fail("could not call first element of expression as a function");
-  // TODO: check argument typs and counts
-  std::vector<llvm::Value *> args_llvm;
-  args_llvm.reserve(size);
-  for (int i = 1; i < size; i++) {
-    llvm::Value *val = vi_get_val(elems[i]->codegen());
-    if (val == NULL) fail("function was passed a non-value");
-    args_llvm.push_back(val);
+  switch (callee.typ.tc) {
+    case tc_fn: {
+      llvm::Function *func = vi_get_fn(callee);
+      if (func == NULL) fail("could not call first element of expression as a function");
+      // TODO: check argument typs and counts
+      std::vector<llvm::Value *> args_llvm;
+      args_llvm.reserve(size);
+      for (int i = 1; i < size; i++) {
+        llvm::Value *val = vi_get_val(elems[i]->codegen());
+        if (val == NULL) fail("function was passed a non-value");
+        args_llvm.push_back(val);
+      }
+      llvm::Value *lval = Builder.CreateCall(func, args_llvm);
+      return var_info_from_value(lval, callee.typ.t2[0]);
+    }
+    case tc_typ: { // get a tensor typ (supplemented with values for variable size dims)
+      Typ anstyp = typ_from_tc(tc_tens);
+      VarInfo ans;
+      anstyp.t1.push_back(callee.typval); // set element typ
+      int size = elems.size();
+      for (int i = 1; i < size; i++) {
+        int *dimsz = elems[i]->get_int();
+        if (dimsz == NULL) {
+          anstyp.szs.push_back(-1);
+          VarInfo vi_dimsz = elems[i]->codegen();
+          if (vi_dimsz.typ.tc != tc_int) fail("expected dimension size to be an integer");
+          ans.dimvals.push_back(vi_dimsz.val);
+        } else {
+          anstyp.szs.push_back(*dimsz);
+        }
+      }
+      ans.typ = typ_from_tc(tc_typ);
+      ans.typval = anstyp;
+      return ans;
+    }
+    case tc_tens:
+      fail("tensor indexing not implemented"); // TODO
+      return var_info_fail();
+    default:
+      fail("first element of s expr can't be called or accessed, and is not a typ");
+      return var_info_fail();
   }
-  llvm::Value *lval = Builder.CreateCall(func, args_llvm);
-  return var_info_from_value(lval, callee.typ.t2[0]);
-
 }
 
 
