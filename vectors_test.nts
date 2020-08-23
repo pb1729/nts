@@ -1,4 +1,65 @@
+(def int prn_digit (int digit)
+  (if (< digit -9) (putchar 35)
+  (if (> digit  9) (putchar 35)
+  (if (=< 0 digit)
+    (putchar (+ 48 digit))
+    (putchar (- 48 digit))))))
+
+(predef int pow (int int)) # recursive
+(def int pow (int a int b)
+  (if (> b 0)
+    (* a (pow a (+ -1 b)))
+    1))
+
+(def void prn_int (int x int width)
+  (for i width
+    (if (= i 0)
+      (if (< x 0)
+        (putchar 45)  # '-'
+        (putchar 43)) # '+'
+      (prn_digit (/r
+        (/ x
+          (pow 10 (- width (+ i 1))))
+        10)))))
+
+(def void putch (int ch)
+  (putchar ch))
+
+(def void putint (int x) # TODO: make this work...
+  (do
+    (prn_int x 20)
+    (putch 10)))
+
+# ^^^ above code is from prn_int.nts. TODO: implement code importing...
+
+# 1d tensor:
 (do
-  (make (int (+ 3 4) 173 (+ 6 7)) a)
+  (make (int 10) a)
+  (for i 10
+    (putint (a i))))
+(putch 10)
+
+# 2d tensor:
+(do
+  (make (int 10 11) a)
+  (putint (a 1 2)))
+(putch 10)
+
+# dynamic size 1d tensor:
+(do
+  (make (int (+ 3 4)) a)
+  (putint (a 3)))
+(putch 10)
+
+# dynamic size 2d tensor:
+(do
+  (make (int (+ 3 4) (+ 5 6)) a)
+  (putint (a 1 2)))
+
+# all kinds of crazy stuff
+(do
+  (make (int (+ 3 4) 173 (+ 6 7) 21) a)
   (make int b)
-  (make (int 2 3 5 7 11) c))
+  (make (int 2 3 5 7 11) c)
+  (putint (a 1 2 3)) # note the partial indexing... typs do not work out right now, though it compiles
+  (putint (c 1 1 2 2 3)))

@@ -496,6 +496,7 @@ VarInfo alloc_typ(VarInfo vi_typ) {
       llvm::Value *allocinst = Builder.CreateAlloca(typ_conv(vi_typ.typval.t1[0]), 0, finalsz, "alloctens");
       ans.typ = vi_typ.typval;
       ans.val = allocinst;
+      ans.dimvals = vi_typ.dimvals; // TODO: this is very inelegant, should assign struct fields for this or something
       return ans;
     }
     default: {
@@ -869,7 +870,7 @@ VarInfo ExprCall::codegen() {
   // Case: calling an already defined function / accessing an element of a tensor (TODO) / constructing a tensor typ
   VarInfo callee = elems[0]->codegen();
   switch (callee.typ.tc) {
-    case tc_fn: {
+    case tc_fn: { // call a function
       llvm::Function *func = vi_get_fn(callee);
       if (func == NULL) fail("could not call first element of expression as a function");
       // TODO: check argument typs and counts
@@ -903,9 +904,37 @@ VarInfo ExprCall::codegen() {
       ans.typval = anstyp;
       return ans;
     }
-    case tc_tens:
-      fail("tensor indexing not implemented"); // TODO
-      return var_info_fail();
+    case tc_tens: { // index into a tensor
+      VarInfo ans;
+      std::vector<VarInfo> indices;
+      int size = elems.size();
+      for (int i = 1; i < size; i++) { // compute varinfo for each index
+        indices.push_back(elems[i]->codegen());
+      }
+      llvm::Value *index = iconst(0);
+      int dimval_count = 0;
+      for (int i = 0; i < size - 1; i++) { // compute overall index
+        if (i > 0) { // don't need to worry about first dimension size... (until inbounds modding implemented)
+          if (callee.typ.szs[i] >= 0) {
+            index = Builder.CreateMul(index, iconst(callee.typ.szs[i]), "dimmultmp");
+          } else {
+            index = Builder.CreateMul(index, callee.dimvals[dimval_count], "dimmultmp");
+            dimval_count++;
+          }
+        }
+        index = Builder.CreateAdd(index, indices[i].val, "idxaddtmp");
+      }
+      llvm::Value *ptr = Builder.CreateGEP(callee.val, index, "GEPtmp");
+      llvm::Value *lval = Builder.CreateLoad(ptr);
+      // construct the result
+      ans.typ = callee.typ.t1[0]; // get typ of tensor elements
+      ans.val = lval;
+      return ans;
+      // TODO: note that we can't handle tensors of tensors like this: should pass dynamic dimsizes with tensors as struct
+      // TODO: implement atuomatic tensor size inference here
+      // TODO: partial indexing
+      // TODO: force inbounds access with modular arithmetic
+    }
     default:
       fail("first element of s expr can't be called or accessed, and is not a typ");
       return var_info_fail();
