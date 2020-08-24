@@ -183,47 +183,37 @@ typedef struct VarInfo {
   llvm::Value *val;     // The value of this var, if it is a value
   llvm::Function *fun;  // The value of this var, if it is a function
   Typ typval;           // The value of this var, if it is a typ
-  bool fromloc;         // True iff we need to get the value of this var by dereferencing loc
-  llvm::Value *loc;     // The location of this var, if there is location info associated eg. array index, (a 133)
+  llvm::Value *loc;     // The location of this var, if applicable (if val is NULL, we load from this location)
   std::vector<llvm::Value *> dimvals; // the values of the unknown indices of the var, if it is a tensor
 } VarInfo;
 
 VarInfo var_info_from_value(llvm::Value *val, Typ typ) { 
-  VarInfo ans;
+  VarInfo ans = {};
   ans.typ = typ;
   ans.val = val;
   return ans;
 }
 VarInfo var_info_from_function(llvm::Function *fun, Typ typ) { 
-  VarInfo ans;
+  VarInfo ans = {};
   ans.typ = typ;
   ans.fun  = fun;
   return ans;
 }
 VarInfo var_info_from_typ(Typ typval) {
-  VarInfo ans;
+  VarInfo ans = {};
   ans.typ = typ_from_tc(tc_typ);
   ans.typval = typval;
   return ans;
 }
 VarInfo var_info_fail() {
-  VarInfo ans;
+  VarInfo ans = {};
   ans.typ = typ_from_tc(tc_fail);
   return ans;
 }
 VarInfo var_info_void() {
-  VarInfo ans;
+  VarInfo ans = {};
   ans.typ = typ_from_tc(tc_void);
   return ans;
-}
-
-llvm::Value *vi_get_val(VarInfo vi) {
-  switch (vi.typ.tc) {
-    case tc_int: // TODO: add more here as time goes on...
-      return vi.val;
-    default:
-      return NULL;
-  }
 }
 
 llvm::Function *vi_get_fn(VarInfo vi) {
@@ -482,7 +472,7 @@ bool is_subtyp(Typ t1, Typ t2) {
 
 VarInfo alloc_typ(VarInfo vi_typ) {
   // allocate space for a varible with typ (and any auxilliary info) given by typ
-  VarInfo ans;
+  VarInfo ans = {};
   switch (vi_typ.typval.tc) {
     case tc_tens: {
       int prod_sz = 1;
@@ -505,6 +495,22 @@ VarInfo alloc_typ(VarInfo vi_typ) {
       ans.val = allocinst;
       return ans;
     }
+  }
+}
+
+
+llvm::Value *vi_get_val(VarInfo vi) { //TODO TODO TODO TODO: replace currently existing uses of ".val" with this
+  switch (vi.typ.tc) {
+    case tc_tens: // TODO: add more here as time goes on...
+    case tc_int:
+    case tc_bit:
+      if (vi.val != NULL) { // either return the explicit value...
+        return vi.val;
+      } else { // or dereference the pointer to the location where the value is held
+        return Builder.CreateLoad(vi.loc);
+      }
+    default:
+      return NULL;
   }
 }
 
@@ -750,7 +756,7 @@ VarInfo ExprCall::codegen() {
       if (size != 4) fail("if expression takes format of (if (condition) (then) (else))");
       // condition
       VarInfo vi_cond = elems[1]->codegen();
-      llvm::Value *bool_cond = vi_cond.val;
+      llvm::Value *bool_cond = vi_get_val(vi_cond);
       // figure out where we are
       llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
       // setup blocks
@@ -775,8 +781,8 @@ VarInfo ExprCall::codegen() {
       TheFunction->getBasicBlockList().push_back(MergeBB);
       Builder.SetInsertPoint(MergeBB);
       llvm::PHINode *ans = Builder.CreatePHI(typ_conv(anstyp), 2, "iftmp");
-      ans->addIncoming(vi_then.val, ThenBB);
-      ans->addIncoming(vi_else.val, ElseBB);
+      ans->addIncoming(vi_get_val(vi_then), ThenBB);
+      ans->addIncoming(vi_get_val(vi_else), ElseBB);
       return var_info_from_value(ans, anstyp);
     }
     if (iden->compare("for") == 0) { // simple for loop expression
@@ -793,7 +799,7 @@ VarInfo ExprCall::codegen() {
       llvm::BasicBlock *LoopBB  = llvm::BasicBlock::Create(TheContext, "loop", TheFunction);
       llvm::BasicBlock *AfterBB = llvm::BasicBlock::Create(TheContext, "afterloop");
       // Insert an explicit fall through from the current block to the LoopBB (if maxiter <= 0, we go straight to the end).
-      llvm::Value *skiploop = Builder.CreateICmpSLE(maxiter.val, iconst(0), "loopcond");
+      llvm::Value *skiploop = Builder.CreateICmpSLE(vi_get_val(maxiter), iconst(0), "loopcond");
       Builder.CreateCondBr(skiploop, AfterBB, LoopBB);
       // Start insertion in LoopBB.
       Builder.SetInsertPoint(LoopBB);
@@ -808,7 +814,7 @@ VarInfo ExprCall::codegen() {
       VarInfo body = elems[3]->codegen();
       llvm::Value *loopvar_next = Builder.CreateAdd(loopvar, // increment loopvar
           iconst(1), "nextvar");
-      llvm::Value *endcond = Builder.CreateICmpSLT(loopvar_next, maxiter.val, "loopcond");
+      llvm::Value *endcond = Builder.CreateICmpSLT(loopvar_next, vi_get_val(maxiter), "loopcond");
       llvm::BasicBlock *LoopEndBB = Builder.GetInsertBlock();
       // Insert the conditional branch into the end of LoopEndBB.
       Builder.CreateCondBr(endcond, LoopBB, AfterBB);
@@ -823,7 +829,7 @@ VarInfo ExprCall::codegen() {
     }
     if (iden->compare("do") == 0) { // do all the things in a block, return the last one
       llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
-      VarInfo ans;
+      VarInfo ans = {};
       stackmap<std::string, VarInfo> nv(NamedValues); // new stackmap for variables local to this do block
       NamedValues = &nv;
       for (int i = 1; i < size; i++) {
@@ -886,7 +892,7 @@ VarInfo ExprCall::codegen() {
     }
     case tc_typ: { // get a tensor typ (supplemented with values for variable size dims)
       Typ anstyp = typ_from_tc(tc_tens);
-      VarInfo ans;
+      VarInfo ans = {};
       anstyp.t1.push_back(callee.typval); // set element typ
       int size = elems.size();
       for (int i = 1; i < size; i++) {
@@ -895,7 +901,7 @@ VarInfo ExprCall::codegen() {
           anstyp.szs.push_back(-1);
           VarInfo vi_dimsz = elems[i]->codegen();
           if (vi_dimsz.typ.tc != tc_int) fail("expected dimension size to be an integer");
-          ans.dimvals.push_back(vi_dimsz.val);
+          ans.dimvals.push_back(vi_get_val(vi_dimsz));
         } else {
           anstyp.szs.push_back(*dimsz);
         }
@@ -905,7 +911,7 @@ VarInfo ExprCall::codegen() {
       return ans;
     }
     case tc_tens: { // index into a tensor
-      VarInfo ans;
+      VarInfo ans = {};
       std::vector<VarInfo> indices;
       int size = elems.size();
       for (int i = 1; i < size; i++) { // compute varinfo for each index
@@ -922,13 +928,12 @@ VarInfo ExprCall::codegen() {
             dimval_count++;
           }
         }
-        index = Builder.CreateAdd(index, indices[i].val, "idxaddtmp");
+        index = Builder.CreateAdd(index, vi_get_val(indices[i]), "idxaddtmp");
       }
-      llvm::Value *ptr = Builder.CreateGEP(callee.val, index, "GEPtmp");
-      llvm::Value *lval = Builder.CreateLoad(ptr);
+      llvm::Value *ptr = Builder.CreateGEP(vi_get_val(callee), index, "GEPtmp");
       // construct the result
       ans.typ = callee.typ.t1[0]; // get typ of tensor elements
-      ans.val = lval;
+      ans.loc = ptr; // pass by location, not value
       return ans;
       // TODO: note that we can't handle tensors of tensors like this: should pass dynamic dimsizes with tensors as struct
       // TODO: implement atuomatic tensor size inference here
@@ -940,6 +945,7 @@ VarInfo ExprCall::codegen() {
       return var_info_fail();
   }
 }
+
 
 
 // TODO: type checking...
