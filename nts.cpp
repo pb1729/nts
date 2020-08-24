@@ -849,8 +849,14 @@ VarInfo ExprCall::codegen() {
       return var_info_void();
     }
     if (iden->compare("<-") == 0) { // assign to a variable...
-      fail("'<-' not implemented");
-      return var_info_fail();
+      VarInfo vi_read  = elems[2]->codegen();
+      VarInfo vi_write = elems[1]->codegen();
+      if (vi_write.loc == NULL) { // if we are not dealing with location based variable, fail
+        fail("cannot overwrite non-mutable value (mutable values can be made using 'make')");
+      } else { // otherwise, we write to a specific location
+        Builder.CreateStore(vi_get_val(vi_read), vi_write.loc);
+      }
+      return var_info_void();
     }
     if (iden->compare("{main_program_code}") == 0) {
       llvm::Type *rettyp = llvm::Type::getInt64Ty(TheContext);

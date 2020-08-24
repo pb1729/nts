@@ -63,3 +63,15 @@
   (make (int 2 3 5 7 11) c)
   (putint (a 1 2 3)) # note the partial indexing... typs do not work out right now, though it compiles
   (putint (c 1 1 2 2 3)))
+
+# writing to vectors
+(do
+  (make (int 4 8) a)
+  (for i 4
+    (for j 8
+      (<- (a i j) (* i j))))
+  (putint (a 3 4)))
+
+
+
+
