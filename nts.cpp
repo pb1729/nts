@@ -185,6 +185,8 @@ typedef struct VarInfo {
   Typ typval;           // The value of this var, if it is a typ
   llvm::Value *loc;     // The location of this var, if applicable (if val is NULL, we load from this location)
   std::vector<llvm::Value *> dimvals; // the values of the unknown indices of the var, if it is a tensor
+  std::string *itervar; // The name of the iteration variable that we should write to if this ends up being used as an index
+  llvm::Value *iternum; // If this is an iteration variable, the number of iterations.
 } VarInfo;
 
 VarInfo var_info_from_value(llvm::Value *val, Typ typ) { 
@@ -492,7 +494,7 @@ VarInfo alloc_typ(VarInfo vi_typ) {
     default: {
       llvm::Value *allocinst = Builder.CreateAlloca(typ_conv(vi_typ.typval), 0, iconst(1));
       ans.typ = vi_typ.typval;
-      ans.val = allocinst;
+      ans.loc = allocinst;
       return ans;
     }
   }
@@ -557,6 +559,49 @@ VarInfo ExprIden::codegen() {
   return var_info_fail();
 }
 
+void create_for(int curr_loop, const std::vector<std::string> itervars, Expr *body, llvm::Function *TheFunction) {
+  // create a for loop (helper for ExprCall::codegen())
+  if (curr_loop == itervars.size()) {
+    body->codegen(); // bottom of recursion, codegen the body
+  } else {
+    // loop starts from 0...
+    llvm::Value *startval = iconst(0);
+    llvm::BasicBlock *PreheaderBB = Builder.GetInsertBlock();
+    llvm::BasicBlock *LoopBB  = llvm::BasicBlock::Create(TheContext, "loop", TheFunction);
+    // Start insertion in LoopBB.
+    Builder.SetInsertPoint(LoopBB);
+    // Start the PHI node with an entry for Start.
+    llvm::PHINode *loopvar = Builder.CreatePHI(llvm::Type::getInt64Ty(TheContext),
+                                    2, itervars[curr_loop]);
+    loopvar->addIncoming(startval, PreheaderBB);
+    // set the (llvm) value of the iteration variable in NamedValues
+    NamedValues->at(itervars[curr_loop]).val = loopvar;
+    
+    // loop body (may contain other loops):
+    create_for(curr_loop + 1, itervars, body, TheFunction); // // // RECURSIVE CALL // // //
+    // end loop body, iternum should now be set for all iteration variables
+    
+    // get the inferred iternum
+    llvm::Value *iternum = NamedValues->at(itervars[curr_loop]).iternum;
+    // increment and check if loop is done
+    llvm::Value *loopvar_next = Builder.CreateAdd(loopvar, iconst(1), "nextvar");
+    llvm::Value *endcond = Builder.CreateICmpSLT(loopvar_next, iternum, "loopcond");
+    llvm::BasicBlock *LoopEndBB = Builder.GetInsertBlock();
+    // add the other incoming path to loopvar phi node
+    loopvar->addIncoming(loopvar_next, LoopEndBB);
+    // create block to exit into from loop
+    llvm::BasicBlock *AfterBB = llvm::BasicBlock::Create(TheContext, "afterloop");
+    // Insert the conditional branch into the end of LoopEndBB.
+    Builder.CreateCondBr(endcond, LoopBB, AfterBB);
+    // Go back and insert an explicit fall through from PreheaderBB to the LoopBB (if iternum <= 0, we go straight to AfterBB).
+    Builder.SetInsertPoint(PreheaderBB);
+    llvm::Value *skiploop = Builder.CreateICmpSLE(iternum, iconst(0), "loopcond");
+    Builder.CreateCondBr(skiploop, AfterBB, LoopBB);
+    // Any new code will be inserted in AfterBB.
+    TheFunction->getBasicBlockList().push_back(AfterBB);
+    Builder.SetInsertPoint(AfterBB);
+  }
+}
 
 VarInfo ExprCall::codegen() {
   // TODO: special handling for for loops, def, <-, lambda, tensors, +, -, *, /, etc.
@@ -807,7 +852,7 @@ VarInfo ExprCall::codegen() {
       llvm::PHINode *loopvar = Builder.CreatePHI(llvm::Type::getInt64Ty(TheContext),
                                       2, *loopvar_iden);
       loopvar->addIncoming(startval, PreheaderBB);
-      stackmap<std::string, VarInfo> nv(NamedValues); // new stackmap for arguments and local variables of this fn...
+      stackmap<std::string, VarInfo> nv(NamedValues); // new stackmap for iteration var
       NamedValues = &nv;
       NamedValues->set(*loopvar_iden, var_info_from_value(loopvar, typ_from_tc(tc_int)));
       // loop body
@@ -825,7 +870,42 @@ VarInfo ExprCall::codegen() {
       loopvar->addIncoming(loopvar_next, LoopEndBB);
       // clean up NamedValues
       NamedValues = nv.pop();
-      return var_info_void(); // TODO: make for loops return vectors, not void
+      return var_info_void();
+    }
+    if (iden->compare("tfor") == 0) { // Tensor for loop expression
+      std::vector<Expr *> *iterlist = elems[1]->get_elems();
+      if (iterlist == NULL) fail("when using tfor, first arg should be list of iteration variables");
+      // prepare NamedValues for iteration vars
+      stackmap<std::string, VarInfo> nv(NamedValues);
+      NamedValues = &nv;
+      // get current function
+      llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
+      // prepare list of iteration variable names:
+      std::vector<std::string> itervar_idens;
+      // create itervars...
+      for (int i = 0; i < iterlist->size(); i++) {
+        std::string *itervar_iden = (*iterlist)[i]->get_iden();
+        llvm::Value *iternum = NULL;
+        if (itervar_iden == NULL) { // case where we have (itervar (iternum)), so iternum is specified
+          std::vector<Expr *> *pair = (*iterlist)[i]->get_elems();
+          if (pair == NULL) fail("can't put number into iteration");
+          itervar_iden = (*pair)[0]->get_iden();
+          if (itervar_iden == NULL) fail("first element must be an identifier");
+          iternum = vi_get_val((*pair)[1]->codegen());
+        }
+        // create iteration variable:
+        VarInfo vi_itervar = {};
+        vi_itervar.typ = typ_from_tc(tc_int);
+        vi_itervar.iternum = iternum;
+        vi_itervar.itervar = itervar_iden; // give reference to name for dimsz inference
+        NamedValues->set(*itervar_iden, vi_itervar);
+        itervar_idens.push_back(*itervar_iden);
+      }
+      create_for(0, itervar_idens, elems[2], TheFunction); // create the nested for loops
+      // TODO do automatic dimsz inference in indexing, and '+', 'mod', and eventually other fns
+      // clean up NamedValues
+      NamedValues = nv.pop();
+      return var_info_void(); // TODO: make for loop return a tensor, if body has non-void return typ
     }
     if (iden->compare("do") == 0) { // do all the things in a block, return the last one
       llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
@@ -926,14 +1006,20 @@ VarInfo ExprCall::codegen() {
       llvm::Value *index = iconst(0);
       int dimval_count = 0;
       for (int i = 0; i < size - 1; i++) { // compute overall index
-        if (i > 0) { // don't need to worry about first dimension size... (until inbounds modding implemented)
-          if (callee.typ.szs[i] >= 0) {
-            index = Builder.CreateMul(index, iconst(callee.typ.szs[i]), "dimmultmp");
-          } else {
-            index = Builder.CreateMul(index, callee.dimvals[dimval_count], "dimmultmp");
-            dimval_count++;
-          }
+        llvm::Value *dimsz;
+        // compute dimsz
+        if (callee.typ.szs[i] >= 0) {
+          dimsz = iconst(callee.typ.szs[i]);
+        } else {
+          dimsz = callee.dimvals[dimval_count];
+          dimval_count++;
         }
+        // automatic iternum inference
+        if (indices[i].itervar != NULL && indices[i].iternum == NULL) {
+          NamedValues->at(*indices[i].itervar).iternum = dimsz; // modify var info in NamedValues
+        }
+        // index computation
+        index = Builder.CreateMul(index, dimsz, "dimmultmp");
         index = Builder.CreateAdd(index, vi_get_val(indices[i]), "idxaddtmp");
       }
       llvm::Value *ptr = Builder.CreateGEP(vi_get_val(callee), index, "GEPtmp");

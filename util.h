@@ -34,7 +34,7 @@ public:
   }
 
   // access element using key
-  U at(T key) {
+  U& at(T key) {
     if (prev == NULL)
       return curr.at(key);
     typename std::map<T, U>::iterator iter = curr.find(key);

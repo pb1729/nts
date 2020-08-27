@@ -1,0 +1,87 @@
+(def void putch (int ch)
+  (putchar ch))
+
+(def int prn_digit (int digit)
+  (if (< digit -9) (putchar 35)
+  (if (> digit  9) (putchar 35)
+  (if (=< 0 digit)
+    (putchar (+ 48 digit))
+    (putchar (- 48 digit))))))
+
+(predef int pow (int int)) # recursive
+(def int pow (int a int b)
+  (if (> b 0)
+    (* a (pow a (+ -1 b)))
+    1))
+
+(def void prn_int (int x int width)
+  (for i width
+    (if (= i 0)
+      (if (< x 0)
+        (putchar 45)  # '-'
+        (putchar 43)) # '+'
+      (prn_digit (/r
+        (/ x
+          (pow 10 (- width (+ i 1))))
+        10)))))
+
+(def void putint (int x)
+  (do
+    (prn_int x 20)
+    (putch 10)))
+
+
+
+# test a simple matrix multiplication
+(do
+  (make (int 3 3) A)
+  (make (int 3) v)
+  (<- (v i) i)[i]
+  (<- (A i j) (+ i (* 3 j)))[i j]
+  (do
+    (make int tot)
+    (<- tot 0)
+    (<- tot (+ tot (* (A i j) (v j))))[j]
+    (putint tot)
+  )[i] # TODO: implement 'sum'
+)
+
+(putch 10)
+
+(do # test making non-tensor variables
+  (make int x)
+  (<- x 0)
+  (<- x (+ x 14))
+  (putint x))
+
+(putch 10)
+
+(do # fibonacci
+  (make (int 14) f)
+  (<- (f 0) 0)
+  (<- (f 1) 1)
+  (<- (f (+ i 2)) (+ (f i) (f (+ i 1))))[(i 12)]
+  (putint (f 9))
+)
+
+(putch 10)
+
+(do # all of fibonacci
+  (make (int 14) f)
+  (<- (f 0) 0)
+  (<- (f 1) 1)
+  (<- (f (+ i 2)) (+ (f i) (f (+ i 1))))[(i 12)]
+  (putint (f j))[j]
+)
+
+(putch 10)
+
+(do # simple 2d test...
+  (make (int 13 15) A)
+  (<- (A i j) (* i j))[i j]
+  (putint (A i (+ i 1)))[(i 13)]
+)
+
+(putch 10)
+
+
