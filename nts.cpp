@@ -565,6 +565,7 @@ void create_itervars(std::vector<std::string> *idens, std::vector<Expr *> *iterl
 
 void create_for(int curr_loop, const std::vector<std::string>& itervars, Expr *body, llvm::Function *TheFunction) {
   // create a for loop (helper for ExprCall::codegen())
+  // on initial call, we should have curr_loop=0
   if (curr_loop == itervars.size()) {
     body->codegen(); // bottom of recursion, codegen the body
   } else {
@@ -604,6 +605,65 @@ void create_for(int curr_loop, const std::vector<std::string>& itervars, Expr *b
     // Any new code will be inserted in AfterBB.
     TheFunction->getBasicBlockList().push_back(AfterBB);
     Builder.SetInsertPoint(AfterBB);
+  }
+}
+
+llvm::Value *create_sum(int curr_loop, const std::vector<std::string>& itervars, Expr *body, llvm::Function *TheFunction) {
+  // create a for loop (helper for ExprCall::codegen())
+  // on initial call, we should have curr_loop=0
+  if (curr_loop == itervars.size()) {
+    VarInfo vi_body = body->codegen(); // bottom of recursion, codegen the body
+    if (vi_body.typ.tc != tc_int) body->fail("Expected numerical expression.");
+    return vi_get_val(vi_body);
+  } else {
+    llvm::BasicBlock *PreheaderBB = Builder.GetInsertBlock();
+    llvm::BasicBlock *LoopBB  = llvm::BasicBlock::Create(TheContext, "loop", TheFunction);
+    // Start insertion in LoopBB.
+    Builder.SetInsertPoint(LoopBB);
+    // phi node for sum variable
+    llvm::PHINode *sumvar  = Builder.CreatePHI(llvm::Type::getInt64Ty(TheContext),
+                                    2, itervars[curr_loop]);
+    // phi node for iteration variable
+    llvm::PHINode *loopvar = Builder.CreatePHI(llvm::Type::getInt64Ty(TheContext),
+                                    2, itervars[curr_loop]);
+    // both variables have an initial value of 0
+    sumvar ->addIncoming(iconst(0), PreheaderBB);
+    loopvar->addIncoming(iconst(0), PreheaderBB);
+    // set the (llvm) value of the iteration variable in NamedValues
+    NamedValues->at(itervars[curr_loop]).val = loopvar;
+    
+    // loop body (may contain other loops):
+    llvm::Value *prev_sum = create_sum(curr_loop + 1, itervars, body, TheFunction); // // // RECURSIVE CALL // // //
+    // end loop body, iternum should now be set for all iteration variables
+    
+    // add subtotal onto the sum
+    llvm::Value *sumvar_next = Builder.CreateAdd(prev_sum, sumvar, "sumvarnext");
+    // get the inferred iternum
+    llvm::Value *iternum = NamedValues->at(itervars[curr_loop]).iternum;
+    // increment and check if loop is done
+    llvm::Value *loopvar_next = Builder.CreateAdd(loopvar, iconst(1), "nextvar");
+    llvm::Value *endcond = Builder.CreateICmpSLT(loopvar_next, iternum, "loopcond");
+    llvm::BasicBlock *LoopEndBB = Builder.GetInsertBlock();
+    // add incoming path from LoopEndBB to the phi nodes
+    loopvar->addIncoming(loopvar_next, LoopEndBB);
+    sumvar ->addIncoming(sumvar_next,  LoopEndBB);
+    // create block to exit into from loop
+    llvm::BasicBlock *AfterBB = llvm::BasicBlock::Create(TheContext, "afterloop");
+    // Insert the conditional branch into the end of LoopEndBB.
+    Builder.CreateCondBr(endcond, LoopBB, AfterBB);
+    // Go back and insert an explicit fall through from PreheaderBB to the LoopBB (if iternum <= 0, we go straight to AfterBB).
+    Builder.SetInsertPoint(PreheaderBB);
+    llvm::Value *skiploop = Builder.CreateICmpSLE(iternum, iconst(0), "loopcond");
+    Builder.CreateCondBr(skiploop, AfterBB, LoopBB);
+    // Any new code will be inserted in AfterBB.
+    TheFunction->getBasicBlockList().push_back(AfterBB);
+    Builder.SetInsertPoint(AfterBB);
+    // return the sum of all results in the loop
+    llvm::PHINode *curr_sum = Builder.CreatePHI(llvm::Type::getInt64Ty(TheContext),
+                                    2, itervars[curr_loop]);
+    curr_sum->addIncoming(iconst(0), PreheaderBB);
+    curr_sum->addIncoming(sumvar_next, LoopEndBB);
+    return curr_sum;
   }
 }
 
@@ -895,49 +955,22 @@ VarInfo ExprCall::codegen() {
       // TODO do automatic dimsz inference in indexing, and '+', 'mod', and eventually other fns
       return var_info_void(); // TODO: make for loop return a tensor, if body has non-void return typ
     }
-    /*if (iden->compare("sum") == 0) { // Sum over values of an iteration variable
+    if (iden->compare("sum") == 0) { // Sum over values of an iteration variable
       // eg. (sum i (expr i))
-      std::string *loopvar_iden = elems[1]->get_iden(); // name of loop variable...
-      if (loopvar_iden == NULL) fail("expected a symbol for the iteration variable name");
-      // compute max number of iterations
-      VarInfo maxiter = elems[2]->codegen();
-      if (!is_subtyp(maxiter.typ, typ_from_tc(tc_int))) fail("number of iterations must be an integer");
-      // loop starts from 0...
-      llvm::Value *startval = iconst(0);
-      llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
-      llvm::BasicBlock *PreheaderBB = Builder.GetInsertBlock();
-      llvm::BasicBlock *LoopBB  = llvm::BasicBlock::Create(TheContext, "loop", TheFunction);
-      llvm::BasicBlock *AfterBB = llvm::BasicBlock::Create(TheContext, "afterloop");
-      // Insert an explicit fall through from the current block to the LoopBB (if maxiter <= 0, we go straight to the end).
-      llvm::Value *skiploop = Builder.CreateICmpSLE(vi_get_val(maxiter), iconst(0), "loopcond");
-      Builder.CreateCondBr(skiploop, AfterBB, LoopBB);
-      // Start insertion in LoopBB.
-      Builder.SetInsertPoint(LoopBB);
-      // Start the PHI node with an entry for Start.
-      llvm::PHINode *loopvar = Builder.CreatePHI(llvm::Type::getInt64Ty(TheContext),
-                                      2, *loopvar_iden);
-      loopvar->addIncoming(startval, PreheaderBB);
+      std::vector<Expr *> *iterlist = elems[1]->get_elems();
+      if (iterlist == NULL) fail("when using tfor, first arg should be a list of iteration variables");
+      std::vector<std::string> itervar_idens;
       // prepare NamedValues for iteration vars
       stackmap<std::string, VarInfo> nv(NamedValues);
       NamedValues = &nv;
-      NamedValues->set(*loopvar_iden, var_info_from_value(loopvar, typ_from_tc(tc_int)));
-      // loop body
-      VarInfo body = elems[3]->codegen();
-      llvm::Value *loopvar_next = Builder.CreateAdd(loopvar, // increment loopvar
-          iconst(1), "nextvar");
-      llvm::Value *endcond = Builder.CreateICmpSLT(loopvar_next, vi_get_val(maxiter), "loopcond");
-      llvm::BasicBlock *LoopEndBB = Builder.GetInsertBlock();
-      // Insert the conditional branch into the end of LoopEndBB.
-      Builder.CreateCondBr(endcond, LoopBB, AfterBB);
-      // Any new code will be inserted in AfterBB.
-      TheFunction->getBasicBlockList().push_back(AfterBB);
-      Builder.SetInsertPoint(AfterBB);
-      // add other incoming path to loopvar phi node
-      loopvar->addIncoming(loopvar_next, LoopEndBB);
+      create_itervars(&itervar_idens, iterlist);
+      // get current function
+      llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
+      llvm::Value *sumval = create_sum(0, itervar_idens, elems[2], TheFunction); // create the nested for loops
       // clean up NamedValues
       NamedValues = nv.pop();
-      return var_info_void();
-    }*/
+      return var_info_from_value(sumval, typ_from_tc(tc_int));
+    }
     if (iden->compare("do") == 0) { // do all the things in a block, return the last one
       llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
       VarInfo ans = {};

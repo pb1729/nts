@@ -34,16 +34,26 @@
 
 # test a simple matrix multiplication
 (do
-  (make (int 3 3) A)
-  (make (int 3) v)
+  (make (int 4 3) A)
+  (make (int 3)   v)
+  (make (int 4)   ans)
   (<- (v i) i)[i]
   (<- (A i j) (+ i (* 3 j)))[i j]
-  (do
-    (make int tot)
-    (<- tot 0)
-    (<- tot (+ tot (* (A i j) (v j))))[j]
-    (putint tot)
-  )[i] # TODO: implement 'sum'
+  # do the multiplication:
+  (<- (ans i)
+    (sum (j)
+      (* (A i j) (v j))))[i]
+  (putint (ans i))[i]
+)
+
+(putch 10)
+
+#multivariable sum test
+(do
+  (make (int 10 10) table)
+  (<- (table i j) (* i j))[i j]
+  (putint
+    (sum ((i 10) j) (table i j)))
 )
 
 (putch 10)
