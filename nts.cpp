@@ -501,7 +501,7 @@ VarInfo alloc_typ(VarInfo vi_typ) {
 }
 
 
-llvm::Value *vi_get_val(VarInfo vi) { //TODO TODO TODO TODO: replace currently existing uses of ".val" with this
+llvm::Value *vi_get_val(VarInfo vi) {
   switch (vi.typ.tc) {
     case tc_tens: // TODO: add more here as time goes on...
     case tc_int:
@@ -514,30 +514,6 @@ llvm::Value *vi_get_val(VarInfo vi) { //TODO TODO TODO TODO: replace currently e
     default:
       return NULL;
   }
-}
-
-
-// prefill some named values:
-void prefill_builtins() {
-  // basic type definitions:
-  NamedValues->set("bit", var_info_from_typ(typ_from_tc(tc_bit)));
-  NamedValues->set("int", var_info_from_typ(typ_from_tc(tc_int)));
-  NamedValues->set("void", var_info_from_typ(typ_from_tc(tc_void)));
-  
-  // define true / false
-  NamedValues->set("false", var_info_from_value(bconst(0), typ_from_tc(tc_bit)));
-  NamedValues->set("true",  var_info_from_value(bconst(1), typ_from_tc(tc_bit)));
-  
-  // steal the putchar function from C
-  std::vector<llvm::Type *> args(1, llvm::Type::getInt64Ty(TheContext));
-  Typ fntyp = typ_from_tc(tc_fn); // create a new empty function type
-  fntyp.t1.push_back(typ_from_tc(tc_int)); // add argument typs
-  fntyp.t2.push_back(typ_from_tc(tc_int)); // add return typ
-  llvm::FunctionType *FT = llvm::FunctionType::get(
-    llvm::Type::getInt64Ty(TheContext), args, false);
-  llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "putchar", TheModule);
-  NamedValues->set("putchar", var_info_from_function(F, fntyp));
-  // TODO: steal malloc, free from C
 }
 
 
@@ -559,7 +535,35 @@ VarInfo ExprIden::codegen() {
   return var_info_fail();
 }
 
-void create_for(int curr_loop, const std::vector<std::string> itervars, Expr *body, llvm::Function *TheFunction) {
+
+void create_itervars(std::vector<std::string> *idens, std::vector<Expr *> *iterlist) {
+  // create a bunch of iteration variables, write them to NamedValues
+  // write their names to idens
+  // paired with a call to "clean_itervars"
+  std::vector<std::string> ans;
+  // create itervars...
+  for (int i = 0; i < iterlist->size(); i++) {
+    std::string *itervar_iden = (*iterlist)[i]->get_iden();
+    llvm::Value *iternum = NULL;
+    if (itervar_iden == NULL) { // case where we have (itervar (iternum)), so iternum is specified
+      std::vector<Expr *> *pair = (*iterlist)[i]->get_elems();
+      if (pair == NULL) (*iterlist)[i]->fail("iteration variable must be a symbol, or (symbol, integer)"); // TODO: (symbol inb) (inbounds instead of rolling)
+      itervar_iden = (*pair)[0]->get_iden();
+      if (itervar_iden == NULL) (*iterlist)[i]->fail("first element must be an identifier");
+      iternum = vi_get_val((*pair)[1]->codegen());
+    }
+    // create iteration variable:
+    VarInfo vi_itervar = {};
+    vi_itervar.typ = typ_from_tc(tc_int);
+    vi_itervar.iternum = iternum;
+    vi_itervar.itervar = itervar_iden; // give reference to name for dimsz inference
+    NamedValues->set(*itervar_iden, vi_itervar);
+    idens->push_back(*itervar_iden);
+  }
+}
+
+
+void create_for(int curr_loop, const std::vector<std::string>& itervars, Expr *body, llvm::Function *TheFunction) {
   // create a for loop (helper for ExprCall::codegen())
   if (curr_loop == itervars.size()) {
     body->codegen(); // bottom of recursion, codegen the body
@@ -612,6 +616,9 @@ VarInfo ExprCall::codegen() {
     // TODO: assertions for argument number and structure for builtins
     // TODO: clear out the repetition...
     // TODO: add floats, handle overloading (of bits, ints, eventually floats)
+    if (iden->compare("ignore") == 0) { // lets you comment out blocks of (syntactically correct) code (TODO: add legit block comments)
+      return var_info_void();
+    }
     if (iden->compare("+") == 0) { // handle addition
       llvm::Value *argl = vi_get_val(elems[1]->codegen());
       if (argl == NULL) fail("could not determine value of left argument");
@@ -875,38 +882,62 @@ VarInfo ExprCall::codegen() {
     if (iden->compare("tfor") == 0) { // Tensor for loop expression
       std::vector<Expr *> *iterlist = elems[1]->get_elems();
       if (iterlist == NULL) fail("when using tfor, first arg should be list of iteration variables");
+      std::vector<std::string> itervar_idens;
       // prepare NamedValues for iteration vars
       stackmap<std::string, VarInfo> nv(NamedValues);
       NamedValues = &nv;
+      create_itervars(&itervar_idens, iterlist);
       // get current function
       llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
-      // prepare list of iteration variable names:
-      std::vector<std::string> itervar_idens;
-      // create itervars...
-      for (int i = 0; i < iterlist->size(); i++) {
-        std::string *itervar_iden = (*iterlist)[i]->get_iden();
-        llvm::Value *iternum = NULL;
-        if (itervar_iden == NULL) { // case where we have (itervar (iternum)), so iternum is specified
-          std::vector<Expr *> *pair = (*iterlist)[i]->get_elems();
-          if (pair == NULL) fail("can't put number into iteration");
-          itervar_iden = (*pair)[0]->get_iden();
-          if (itervar_iden == NULL) fail("first element must be an identifier");
-          iternum = vi_get_val((*pair)[1]->codegen());
-        }
-        // create iteration variable:
-        VarInfo vi_itervar = {};
-        vi_itervar.typ = typ_from_tc(tc_int);
-        vi_itervar.iternum = iternum;
-        vi_itervar.itervar = itervar_iden; // give reference to name for dimsz inference
-        NamedValues->set(*itervar_iden, vi_itervar);
-        itervar_idens.push_back(*itervar_iden);
-      }
       create_for(0, itervar_idens, elems[2], TheFunction); // create the nested for loops
-      // TODO do automatic dimsz inference in indexing, and '+', 'mod', and eventually other fns
       // clean up NamedValues
       NamedValues = nv.pop();
+      // TODO do automatic dimsz inference in indexing, and '+', 'mod', and eventually other fns
       return var_info_void(); // TODO: make for loop return a tensor, if body has non-void return typ
     }
+    /*if (iden->compare("sum") == 0) { // Sum over values of an iteration variable
+      // eg. (sum i (expr i))
+      std::string *loopvar_iden = elems[1]->get_iden(); // name of loop variable...
+      if (loopvar_iden == NULL) fail("expected a symbol for the iteration variable name");
+      // compute max number of iterations
+      VarInfo maxiter = elems[2]->codegen();
+      if (!is_subtyp(maxiter.typ, typ_from_tc(tc_int))) fail("number of iterations must be an integer");
+      // loop starts from 0...
+      llvm::Value *startval = iconst(0);
+      llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
+      llvm::BasicBlock *PreheaderBB = Builder.GetInsertBlock();
+      llvm::BasicBlock *LoopBB  = llvm::BasicBlock::Create(TheContext, "loop", TheFunction);
+      llvm::BasicBlock *AfterBB = llvm::BasicBlock::Create(TheContext, "afterloop");
+      // Insert an explicit fall through from the current block to the LoopBB (if maxiter <= 0, we go straight to the end).
+      llvm::Value *skiploop = Builder.CreateICmpSLE(vi_get_val(maxiter), iconst(0), "loopcond");
+      Builder.CreateCondBr(skiploop, AfterBB, LoopBB);
+      // Start insertion in LoopBB.
+      Builder.SetInsertPoint(LoopBB);
+      // Start the PHI node with an entry for Start.
+      llvm::PHINode *loopvar = Builder.CreatePHI(llvm::Type::getInt64Ty(TheContext),
+                                      2, *loopvar_iden);
+      loopvar->addIncoming(startval, PreheaderBB);
+      // prepare NamedValues for iteration vars
+      stackmap<std::string, VarInfo> nv(NamedValues);
+      NamedValues = &nv;
+      NamedValues->set(*loopvar_iden, var_info_from_value(loopvar, typ_from_tc(tc_int)));
+      // loop body
+      VarInfo body = elems[3]->codegen();
+      llvm::Value *loopvar_next = Builder.CreateAdd(loopvar, // increment loopvar
+          iconst(1), "nextvar");
+      llvm::Value *endcond = Builder.CreateICmpSLT(loopvar_next, vi_get_val(maxiter), "loopcond");
+      llvm::BasicBlock *LoopEndBB = Builder.GetInsertBlock();
+      // Insert the conditional branch into the end of LoopEndBB.
+      Builder.CreateCondBr(endcond, LoopBB, AfterBB);
+      // Any new code will be inserted in AfterBB.
+      TheFunction->getBasicBlockList().push_back(AfterBB);
+      Builder.SetInsertPoint(AfterBB);
+      // add other incoming path to loopvar phi node
+      loopvar->addIncoming(loopvar_next, LoopEndBB);
+      // clean up NamedValues
+      NamedValues = nv.pop();
+      return var_info_void();
+    }*/
     if (iden->compare("do") == 0) { // do all the things in a block, return the last one
       llvm::Function *TheFunction = Builder.GetInsertBlock()->getParent();
       VarInfo ans = {};
@@ -1038,9 +1069,32 @@ VarInfo ExprCall::codegen() {
   }
 }
 
-
-
 // TODO: type checking...
+
+
+
+// prefill some named values:
+void prefill_builtins() {
+  // basic type definitions:
+  NamedValues->set("bit", var_info_from_typ(typ_from_tc(tc_bit)));
+  NamedValues->set("int", var_info_from_typ(typ_from_tc(tc_int)));
+  NamedValues->set("void", var_info_from_typ(typ_from_tc(tc_void)));
+  
+  // define true / false
+  NamedValues->set("false", var_info_from_value(bconst(0), typ_from_tc(tc_bit)));
+  NamedValues->set("true",  var_info_from_value(bconst(1), typ_from_tc(tc_bit)));
+  
+  // steal the putchar function from C
+  std::vector<llvm::Type *> args(1, llvm::Type::getInt64Ty(TheContext));
+  Typ fntyp = typ_from_tc(tc_fn); // create a new empty function type
+  fntyp.t1.push_back(typ_from_tc(tc_int)); // add argument typs
+  fntyp.t2.push_back(typ_from_tc(tc_int)); // add return typ
+  llvm::FunctionType *FT = llvm::FunctionType::get(
+    llvm::Type::getInt64Ty(TheContext), args, false);
+  llvm::Function *F = llvm::Function::Create(FT, llvm::Function::ExternalLinkage, "putchar", TheModule);
+  NamedValues->set("putchar", var_info_from_function(F, fntyp));
+  // TODO: steal malloc, free from C
+}
 
 
 //>-----------------------------------------------------------+
